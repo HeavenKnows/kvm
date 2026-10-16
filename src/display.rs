@@ -9,6 +9,10 @@ pub struct Desktop {
     pub displays:Vec<Display>,
 }
 impl Desktop {
+    /// Lightweight placeholder. Never query CoreGraphics on the GUI thread.
+    pub fn fallback()->Self{
+        Self{origin_x:0,origin_y:0,displays:vec![Display{x:0,y:0,w:1920,h:1080}]}
+    }
     pub fn screen(&self)->Screen{crate::model::desktop_size(&self.displays)}
     fn from_global(mut monitors:Vec<(Display,bool)>)->Self{
         if monitors.is_empty(){
@@ -39,7 +43,9 @@ mod platform {
         let error=unsafe{CGGetActiveDisplayList(ids.len() as u32,ids.as_mut_ptr(),&mut n)};
         if error!=0 {return Desktop::from_global(Vec::new());}
         let main=unsafe{CGMainDisplayID()};
-        let monitors=ids[..n as usize].iter().map(|&id|{
+        // Defensive bound: malformed/out-of-range display counts must never
+        // create a slice past the fixed buffer on exotic monitor setups.
+        let monitors=ids[..(n as usize).min(ids.len())].iter().map(|&id|{
             let r=unsafe{CGDisplayBounds(id)};
             (Display{x:r.origin.x.round() as i32,y:r.origin.y.round() as i32,
                 w:(r.size.width.round() as i32).max(100),
