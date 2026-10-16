@@ -85,7 +85,7 @@ mod platform {
     const RIM_TYPEMOUSE:u32=0;
     const MOUSE_MOVE_ABSOLUTE:u16=0x0001;
     // RAWMOUSE.usButtonFlags, see Win32 RI_MOUSE_*_BUTTON_{DOWN,UP}.
-    fn button_changes(flags:u16)->Vec<(rdev::Button,bool)>{
+    pub(super) fn button_changes(flags:u16)->Vec<(rdev::Button,bool)>{
         let mut result=Vec::new();
         for (down,up,button) in [
             (0x0001,0x0002,rdev::Button::Left),
