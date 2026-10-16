@@ -327,6 +327,80 @@ impl KvmApp {
 
 impl eframe::App for KvmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.frames=self.frames.saturating_add(1);
+        if self.frames==1{launch_mark("first-ui-frame");}
+        if let Some(rx)=&self.display_rx{
+            match rx.try_recv(){
+                Ok(desktop)=>{
+                    launch_mark("display-result-received");
+                    let origin=(desktop.origin_x,desktop.origin_y);
+                    if self.state.update_local_desktop(desktop){
+                        native_cursor::set_global_origin(origin.0,origin.1);
+                        self.display_loaded=true;
+                        self.display_slow=false;
+                    }else{
+                        self.display_slow=true;
+                        launch_mark("display-pending-session-restart");
+                    }
+                    self.display_rx=None;
+                }
+                Err(TryRecvError::Empty)=>{}
+                Err(TryRecvError::Disconnected)=>{
+                    self.display_rx=None;
+                    self.display_slow=true;
+                    launch_mark("display-worker-disconnected");
+                }
+            }
+        }
+        if let Some(rx)=&self.ip_rx{
+            match rx.try_recv(){
+                Ok(addresses)=>{self.ips=addresses;self.ip_rx=None;}
+                Err(TryRecvError::Empty)=>{}
+                Err(TryRecvError::Disconnected)=>{self.ip_rx=None;}
+            }
+        }
+        // Never hold the app event loop hostage if an OS monitor API blocks.
+        if !self.display_loaded && self.startup_at.elapsed()>Duration::from_secs(2){
+            self.display_slow=true;
+        }
+        if self.auto_start_waiting &&
+            (self.display_loaded || self.startup_at.elapsed()>Duration::from_secs(2)){
+            self.auto_start_waiting=false;
+            launch_mark("receiver-auto-start");
+            engine::start_server(self.state.clone(),self.settings.clone());
+        }
+        #[cfg(target_os="macos")]
+        {
+            // Status icon must be created after the native event loop starts,
+            // not in run_native's app creator. Give the window a first frame.
+            if !self.tray_attempted && self.frames>=2 {
+                self.tray_attempted=true;
+                launch_mark("tray-create-start");
+                match macos_tray::MacMenuBar::new(ctx,self.settings.language,self.state.clone()){
+                    Ok(tray)=>{self.tray=Some(tray);launch_mark("tray-create-done");}
+                    Err(e)=>launch_mark(&format!("tray-create-error: {e}")),
+                }
+            }
+            if let Some(tray)=&mut self.tray{
+                tray.set_language(self.settings.language);
+                if tray.take_open_request(){
+                    launch_mark("tray-open-settings");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    macos_tray::activate_app();
+                }
+                if ctx.input(|i|i.viewport().close_requested()) && !tray.quitting(){
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+            if self.frames==2{
+                // Accessory apps have no Dock to reactivate an obscured window.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                macos_tray::activate_app();
+            }
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -347,6 +421,17 @@ impl eframe::App for KvmApp {
                 if previous != self.settings.language { self.persist_settings(); }
             });
             let lang = self.settings.language;
+            if self.display_slow{
+                ui.colored_label(egui::Color32::YELLOW,tr(lang,
+                    "外接显示器检测较慢，当前使用安全的单屏回退布局；界面仍然可以操作。",
+                    "External display scan is slow; temporary single-monitor layout is active while the UI remains available."));
+            }
+            #[cfg(target_os="macos")]
+            if self.tray_attempted && self.tray.is_none(){
+                ui.colored_label(egui::Color32::YELLOW,tr(lang,
+                    "菜单栏入口初始化失败；此窗口保持可用，关闭窗口会退出。",
+                    "Menu bar status icon failed; this window remains accessible and closing it quits."));
+            }
             ui.label(tr(lang,
                 "安全的局域网键盘鼠标共享 · Windows ↔ macOS",
                 "Secure LAN keyboard and mouse sharing · Windows ↔ macOS"));
