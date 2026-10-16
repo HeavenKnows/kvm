@@ -1,6 +1,6 @@
 //! macOS status bar integration. Built only on macOS.
 //! The menu lives on the main thread; events request eframe viewport commands.
-use crate::model::Language;
+use crate::{model::Language,engine::Shared};
 use eframe::egui;
 use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
 use tray_icon::{Icon,TrayIcon,TrayIconBuilder,menu::{Menu,MenuItem,MenuEvent}};
@@ -8,6 +8,7 @@ use tray_icon::{Icon,TrayIcon,TrayIconBuilder,menu::{Menu,MenuItem,MenuEvent}};
 pub struct MacMenuBar {
     _tray: TrayIcon,
     open: MenuItem,
+    disconnect: MenuItem,
     quit: MenuItem,
     quitting: Arc<AtomicBool>,
     language: Language,
@@ -30,15 +31,19 @@ fn status_icon() -> Result<Icon, String> {
     Icon::from_rgba(rgba,w,h).map_err(|e|e.to_string())
 }
 impl MacMenuBar {
-    pub fn new(ctx:&egui::Context,language:Language)->Result<Self,String>{
+    pub fn new(ctx:&egui::Context,language:Language,state:Arc<Shared>)->Result<Self,String>{
         let open=MenuItem::new(
             if language==Language::Zh{"打开设置"}else{"Open settings"},true,None);
+        let disconnect=MenuItem::new(
+            if language==Language::Zh{"断开当前连接"}else{"Disconnect current session"},true,None);
         let quit=MenuItem::new(
             if language==Language::Zh{"退出 kvm"}else{"Quit kvm"},true,None);
         let menu=Menu::new();
         menu.append(&open).map_err(|e|e.to_string())?;
+        menu.append(&disconnect).map_err(|e|e.to_string())?;
         menu.append(&quit).map_err(|e|e.to_string())?;
         let open_id=open.id().clone();
+        let disconnect_id=disconnect.id().clone();
         let quit_id=quit.id().clone();
         let quitting=Arc::new(AtomicBool::new(false));
         let will_quit=quitting.clone();
@@ -47,6 +52,9 @@ impl MacMenuBar {
             if e.id==open_id {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                ctx.request_repaint();
+            } else if e.id==disconnect_id {
+                if state.ready.load(Ordering::SeqCst) { state.disconnect_peer(); }
                 ctx.request_repaint();
             } else if e.id==quit_id {
                 will_quit.store(true,Ordering::SeqCst);
@@ -59,13 +67,14 @@ impl MacMenuBar {
             .with_menu(Box::new(menu))
             .with_icon_templated(status_icon()?)
             .build().map_err(|e|e.to_string())?;
-        Ok(Self{_tray:tray,open,quit,quitting,language})
+        Ok(Self{_tray:tray,open,disconnect,quit,quitting,language})
     }
     pub fn quitting(&self)->bool{self.quitting.load(Ordering::SeqCst)}
     pub fn set_language(&mut self, language:Language){
         if self.language==language{return;}
         self.language=language;
         self.open.set_text(if language==Language::Zh{"打开设置"}else{"Open settings"});
+        self.disconnect.set_text(if language==Language::Zh{"断开当前连接"}else{"Disconnect current session"});
         self.quit.set_text(if language==Language::Zh{"退出 kvm"}else{"Quit kvm"});
     }
 }
