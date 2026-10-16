@@ -17,6 +17,7 @@ fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
 }
 
 pub struct Shared {
+    is_receiver:bool,
     pub status:Mutex<UiStatus>,
     pub layout:Mutex<Layout>,
     pub local_screen:Screen,
@@ -44,6 +45,7 @@ impl Shared {
     pub fn new(s:&Settings)->Arc<Self>{
         let (w,h)=rdev::display_size().unwrap_or((1920,1080));
         Arc::new(Self {
+            is_receiver:s.role_server,
             status:Mutex::new(UiStatus::Idle), layout:Mutex::new(s.layout),
             local_screen:Screen::new(w as i32,h as i32),
             remote_screen:Mutex::new(Screen::new(1920,1080)),
@@ -75,9 +77,8 @@ impl Shared {
     }
     /// User-initiated disconnect; receiver keeps listening for the next client.
     pub fn disconnect_peer(&self){
-        if self.active.load(Ordering::SeqCst) {
-            self.return_cursor();
-        }
+        let was_remote=self.active.swap(false,Ordering::SeqCst);
+        if was_remote && !self.is_receiver { self.return_cursor(); }
         self.shutdown_peer();
         self.info(UiStatus::UserDisconnected);
     }
