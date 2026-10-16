@@ -28,6 +28,8 @@ pub enum UiStatus {
     InputHookFailed(String),
     UserDisconnected,
     Stopped,
+    PeerDisconnected(String),
+    TransportClosed(String),
 }
 impl UiStatus {
     pub fn text(&self, language: Language) -> String {
@@ -62,6 +64,8 @@ impl UiStatus {
             InvalidHandshake => (if zh {"接收端响应无效，请检查版本与配对密钥"} else {"Invalid receiver response; check version and pairing key"}).into(),
             UserDisconnected => (if zh {"已主动断开"} else {"Disconnected by user"}).into(),
             Stopped => (if zh {"已停止接收，可重新启动"} else {"Receiver stopped; you can start it again"}).into(),
+            PeerDisconnected(detail) => format!("{}: {detail}",if zh {"上一个连接已结束"}else{"Previous peer disconnected"}),
+            TransportClosed(detail) => format!("{}: {detail}",if zh {"加密连接中断"}else{"Encrypted session closed"}),
             InputHookFailed(e) => format!("{}: {e}", if zh {"输入捕获启动失败"} else {"Input capture failed"}),
             ClipboardRemoteEmpty => (if zh {"远端剪贴板没有可用纯文本"} else {"No plain text available in remote clipboard"}).into(),
         }

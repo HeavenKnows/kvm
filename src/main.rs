@@ -358,9 +358,19 @@ impl eframe::App for KvmApp {
                         self.state.ready.load(Ordering::SeqCst),
                         status.text(Language::En)
                     );
-                    ui.ctx().copy_text(diagnostic);
+                    let history=self.state.history.lock().unwrap().iter()
+                        .cloned().collect::<Vec<_>>().join("\n");
+                    ui.ctx().copy_text(format!("{diagnostic}\nRecent events:\n{history}"));
                 }
             });
+            egui::CollapsingHeader::new(tr(lang,"最近连接事件（保留断线原因）","Recent connection events"))
+                .default_open(true)
+                .show(ui,|ui|{
+                    let history=self.state.history.lock().unwrap();
+                    for line in history.iter().rev().take(8){
+                        ui.small(line);
+                    }
+                });
             if self.state.active.load(Ordering::Relaxed) {
                 ui.colored_label(egui::Color32::LIGHT_GREEN,
                     tr(lang,"正在控制远端 · F12 紧急返回","Remote control active · F12 emergency return"));

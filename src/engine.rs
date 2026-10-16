@@ -1,6 +1,6 @@
-use crate::{input,native_motion, model::{Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
+use crate::{input,native_motion, model::{Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
-use std::{collections::HashSet,net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::Duration};
+use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::{Duration,SystemTime,UNIX_EPOCH}};
 const MAX_TEXT:usize=32*1024;
 
 #[derive(Clone,Copy,PartialEq,Eq,Debug)]
@@ -19,6 +19,8 @@ fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
 pub struct Shared {
     is_receiver:AtomicBool,
     pub status:Mutex<UiStatus>,
+    pub history:Mutex<VecDeque<String>>,
+    fatal_error:Mutex<Option<UiStatus>>,
     pub layout:Mutex<Layout>,
     pub local_screen:Screen,
     pub remote_screen:Mutex<Screen>,
@@ -44,7 +46,9 @@ impl Shared {
         let (w,h)=rdev::display_size().unwrap_or((1920,1080));
         Arc::new(Self {
             is_receiver:AtomicBool::new(s.role_server),
-            status:Mutex::new(UiStatus::Idle), layout:Mutex::new(s.layout),
+            status:Mutex::new(UiStatus::Idle),
+            history:Mutex::new(VecDeque::with_capacity(32)),fatal_error:Mutex::new(None),
+            layout:Mutex::new(s.layout),
             local_screen:Screen::new(w as i32,h as i32),
             remote_screen:Mutex::new(Screen::new(1920,1080)),
             target:Mutex::new(Platform::Mac),active:AtomicBool::new(false),
@@ -58,7 +62,24 @@ impl Shared {
             entry_local:Mutex::new((w as i32/2,h as i32/2)),out:Mutex::new(None),
         })
     }
-    pub fn info(&self,status:UiStatus){*self.status.lock().unwrap()=status;}
+    pub fn info(&self,status:UiStatus){
+        let millis=SystemTime::now().duration_since(UNIX_EPOCH)
+            .unwrap_or_default().as_millis();
+        let detail=format!("[{millis}] {}",status.text(Language::En));
+        *self.status.lock().unwrap()=status;
+        let mut h=self.history.lock().unwrap();
+        if h.back()!=Some(&detail) {
+            h.push_back(detail);
+            if h.len()>32{h.pop_front();}
+        }
+    }
+    fn fatal(&self,status:UiStatus) {
+        *self.fatal_error.lock().unwrap()=Some(status.clone());
+        self.info(status);
+    }
+    fn transport_reason(fault:&Arc<Mutex<Option<String>>>) -> String {
+        fault.lock().unwrap().clone().unwrap_or_else(||"peer closed the connection".into())
+    }
     /// Called by native Windows Raw Input / macOS CGEventTap callbacks.
     /// Synthetic pointer warps no longer contribute to movement; native physical
     /// deltas continue arriving even when the OS pointer is at a screen boundary.
@@ -71,7 +92,7 @@ impl Shared {
     pub fn native_motion_stopped(&self,error:String){
         self.native_started.store(false,Ordering::SeqCst);
         self.shutdown_peer();
-        self.info(UiStatus::InputHookFailed(error));
+        self.fatal(UiStatus::InputHookFailed(error));
     }
     fn store_socket(&self,sock:&TcpStream)->std::io::Result<()> {
         *self.socket.lock().unwrap()=Some(sock.try_clone()?);
@@ -198,7 +219,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                 continue;
             }
             shared.info(UiStatus::Authenticating(peer.to_string()));
-            let (tx,rx,_control)=match wire::connect(stream,&s.secret,false){
+            let (tx,rx,_control,fault)=match wire::connect(stream,&s.secret,false){
                 Ok(v)=>v,
                 Err(e)=>{
                     shared.shutdown_peer();
@@ -260,8 +281,10 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
             }
             for k in pressed {simulate(EventType::KeyRelease(k));}
             for b in buttons {simulate(EventType::ButtonRelease(b));}
+            let detail=Shared::transport_reason(&fault);
             shared.close();
             if !shared.stop_requested.load(Ordering::SeqCst) {
+                shared.info(UiStatus::PeerDisconnected(format!("{peer}: {detail}")));
                 shared.info(UiStatus::Waiting);
             }
         }
@@ -275,15 +298,18 @@ pub fn start_client(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
     shared.is_receiver.store(false,Ordering::SeqCst);
     shared.stop_requested.store(false,Ordering::SeqCst);
+    *shared.fatal_error.lock().unwrap()=None;
     std::thread::spawn(move ||{
         let result=client_session(&shared,s);
         shared.close();
-        // This is deliberately the final step: a retry cannot start while any
-        // previous session still owns the sender or consumes incoming messages.
+        // An input hook may fail on another thread and close the socket.
+        // Preserve its diagnostic rather than overwriting it with "Disconnected".
+        let fatal=shared.fatal_error.lock().unwrap().take();
         shared.started.store(false,Ordering::SeqCst);
         if shared.stop_requested.load(Ordering::SeqCst) {
             shared.info(UiStatus::UserDisconnected);
-        } else if let Err(status)=result {shared.info(status);}
+        } else if let Some(status)=fatal {shared.info(status);}
+        else if let Err(status)=result {shared.info(status);}
         else {shared.info(UiStatus::Disconnected);}
     });
 }
@@ -301,7 +327,7 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
         })?;
     shared.store_socket(&stream).map_err(|e|UiStatus::ConnectFailed(e.to_string()))?;
     if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
-    let (tx,rx,_control)=wire::connect(stream,&s.secret,true)
+    let (tx,rx,_control,fault)=wire::connect(stream,&s.secret,true)
         .map_err(|e|UiStatus::PairingFailed(e.to_string()))?;
     if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
     *shared.out.lock().unwrap()=Some(tx);
@@ -315,7 +341,7 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
             *shared.remote_screen.lock().unwrap()=screen;
         }
         Err(RecvTimeoutError::Timeout)=>return Err(UiStatus::HandshakeTimedOut),
-        Err(RecvTimeoutError::Disconnected)=>return Err(UiStatus::Disconnected),
+        Err(RecvTimeoutError::Disconnected)=>return Err(UiStatus::TransportClosed(Shared::transport_reason(&fault))),
         _=>return Err(UiStatus::InvalidHandshake),
     }
 
@@ -377,7 +403,8 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
             _=>{}
         }
     }
-    Ok(())
+    if shared.stop_requested.load(Ordering::SeqCst){Ok(())}
+    else {Err(UiStatus::TransportClosed(Shared::transport_reason(&fault)))}
 }
 
 fn capture(shared:Arc<Shared>) {
@@ -467,8 +494,7 @@ fn capture(shared:Arc<Shared>) {
     }){
         shared.capture_started.store(false,Ordering::SeqCst);
         shared.close();
-        shared.started.store(false,Ordering::SeqCst);
-        shared.info(UiStatus::InputHookFailed(format!("{e:?}")));
+        shared.fatal(UiStatus::InputHookFailed(format!("{e:?}")));
     }
 }
 

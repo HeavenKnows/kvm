@@ -69,8 +69,13 @@ fn handshake(s:&mut TcpStream, secret:&str,initiator:bool)->io::Result<snow::Tra
 
 /// Reader and writer use separate cloned TcpStream handles, sharing Noise sequence state briefly.
 /// Hook callbacks only ever enqueue; no socket IO, crypto, or clipboard work on hook thread.
+/// Keep the reason a reader/writer exited, for diagnostics on both peers.
+fn record_fault(out:&Arc<Mutex<Option<String>>>,text:String) {
+    let mut slot=out.lock().unwrap();
+    if slot.is_none(){*slot=Some(text);}
+}
 pub fn connect(mut stream:TcpStream,secret:&str,initiator:bool)
-    ->io::Result<(SyncSender<Wire>,Receiver<Wire>,TcpStream)>
+    ->io::Result<(SyncSender<Wire>,Receiver<Wire>,TcpStream,Arc<Mutex<Option<String>>>)>
 {
     stream.set_nodelay(true)?;
     let noise=Arc::new(Mutex::new(handshake(&mut stream,secret,initiator)?));
@@ -78,26 +83,95 @@ pub fn connect(mut stream:TcpStream,secret:&str,initiator:bool)
     let control=stream.try_clone()?;
     let (tx,tx_rx)=mpsc::sync_channel::<Wire>(2048);
     let (rx_tx,rx)=mpsc::sync_channel::<Wire>(2048);
+    let fault=Arc::new(Mutex::new(None));
     let cipher=noise.clone();
+    let write_fault=fault.clone();
     std::thread::spawn(move || {
         let mut out=vec![0;MAX_FRAME];
         while let Ok(msg)=tx_rx.recv() {
-            let msg=match rmp_serde::to_vec(&msg){Ok(v)=>v,Err(_)=>break};
-            if msg.len()>MAX_FRAME-32 {continue;}
-            let n=match cipher.lock().unwrap().write_message(&msg,&mut out){Ok(n)=>n,Err(_)=>break};
-            if frame_write(&mut writer,&out[..n]).is_err(){break;}
+            let payload=match rmp_serde::to_vec(&msg){
+                Ok(v)=>v,
+                Err(e)=>{record_fault(&write_fault,format!("encode message: {e}"));break;}
+            };
+            if payload.len()>MAX_FRAME-32 {
+                record_fault(&write_fault,format!("outbound message too large: {} bytes",payload.len()));
+                break;
+            }
+            let n=match cipher.lock().unwrap().write_message(&payload,&mut out){
+                Ok(n)=>n,
+                Err(e)=>{record_fault(&write_fault,format!("encrypt outbound packet: {e}"));break;}
+            };
+            if let Err(e)=frame_write(&mut writer,&out[..n]){
+                record_fault(&write_fault,format!("write encrypted frame: {e}"));
+                break;
+            }
         }
         let _=writer.shutdown(std::net::Shutdown::Both);
     });
+    let read_fault=fault.clone();
     std::thread::spawn(move || {
         let mut plain=vec![0;MAX_FRAME];
         loop {
-            let pkt=match frame_read(&mut stream){Ok(v)=>v,Err(_)=>break};
-            let n=match noise.lock().unwrap().read_message(&pkt,&mut plain){Ok(n)=>n,Err(_)=>break};
-            let event=match rmp_serde::from_slice::<Wire>(&plain[..n]){Ok(v)=>v,Err(_)=>break};
-            if rx_tx.send(event).is_err(){break;}
+            let pkt=match frame_read(&mut stream){
+                Ok(v)=>v,
+                Err(e)=>{
+                    record_fault(&read_fault,format!("read encrypted frame: {e}"));
+                    break;
+                }
+            };
+            let n=match noise.lock().unwrap().read_message(&pkt,&mut plain){
+                Ok(n)=>n,
+                Err(e)=>{
+                    record_fault(&read_fault,format!("decrypt inbound frame: {e}"));
+                    break;
+                }
+            };
+            let msg=match rmp_serde::from_slice::<Wire>(&plain[..n]){
+                Ok(v)=>v,
+                Err(e)=>{
+                    record_fault(&read_fault,format!("decode inbound message: {e}"));
+                    break;
+                }
+            };
+            if rx_tx.send(msg).is_err(){break;}
         }
         let _=stream.shutdown(std::net::Shutdown::Both);
     });
-    Ok((tx,rx,control))
+    Ok((tx,rx,control,fault))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // Real TCP + Noise handshake + encrypted Hello/MoveBy/Back in both directions.
+    // A compile-only test would miss framing, serialization and transport errors.
+    #[test]
+    fn encrypted_loopback_roundtrip() {
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr=listener.local_addr().unwrap();
+        let responder=std::thread::spawn(move || {
+            let (socket,_)=listener.accept().unwrap();
+            let (tx,rx,_socket,reason)=connect(socket,"0123456789abcdef0123456789abcdef",false).unwrap();
+            tx.send(Wire::Hello{os:Platform::Mac,screen:Screen::new(1440,900)}).unwrap();
+            match rx.recv_timeout(Duration::from_secs(3)).unwrap(){
+                Wire::MoveBy{dx:7,dy:-4}=>{},
+                msg=>panic!("unexpected receiver packet: {msg:?}, reason={:?}",reason.lock().unwrap()),
+            }
+            tx.send(Wire::Back).unwrap();
+        });
+        let socket=TcpStream::connect(addr).unwrap();
+        let (tx,rx,_socket,reason)=connect(socket,"0123456789abcdef0123456789abcdef",true).unwrap();
+        match rx.recv_timeout(Duration::from_secs(3)).unwrap(){
+            Wire::Hello{os:Platform::Mac,screen}=>{
+                assert_eq!(screen.w,1440);
+                assert_eq!(screen.h,900);
+            }
+            msg=>panic!("unexpected initial packet: {msg:?}, reason={:?}",reason.lock().unwrap()),
+        }
+        tx.send(Wire::MoveBy{dx:7,dy:-4}).unwrap();
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(3)).unwrap(),Wire::Back));
+        responder.join().unwrap();
+    }
 }
