@@ -294,6 +294,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                                 armed_return=false;
                                 first_motion_seen=false;
                                 entered_at=Some(std::time::Instant::now());
+                                shared.info(UiStatus::RemoteCursorPlaced);
                                 shared.send(Wire::EnterAck{accepted:true});
                             }
                             Err(e)=>{
@@ -311,6 +312,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     }
                     Wire::MoveBy{dx,dy} if shared.active.load(Ordering::Relaxed)=>{
                         if dx==0 && dy==0{continue;}
+                        if !first_motion_seen {shared.info(UiStatus::RemoteMouseMoving);}
                         first_motion_seen=true;
                         entered_at=None;
                         mouse.0=(mouse.0.saturating_add(dx)).clamp(0,shared.local_screen.w-1);

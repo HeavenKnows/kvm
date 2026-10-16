@@ -33,6 +33,8 @@ pub enum UiStatus {
     MouseEntryRejected,
     MouseEntryTimedOut,
     MouseNoMovement,
+    RemoteCursorPlaced,
+    RemoteMouseMoving,
 }
 impl UiStatus {
     pub fn text(&self, language: Language) -> String {
@@ -72,6 +74,8 @@ impl UiStatus {
             MouseEntryRejected => (if zh {"远端光标定位失败，仍可在本机操作"}else{"Remote cursor placement failed; stayed local"}).into(),
             MouseEntryTimedOut => (if zh {"远端未确认鼠标进入，仍可在本机操作"}else{"Remote entry was not acknowledged; stayed local"}).into(),
             MouseNoMovement => (if zh {"远端未收到鼠标位移，已自动返回本机"}else{"No remote movement received; returned automatically"}).into(),
+            RemoteCursorPlaced => (if zh {"远端光标定位成功，等待鼠标位移"}else{"Remote cursor positioned; awaiting mouse deltas"}).into(),
+            RemoteMouseMoving => (if zh {"正在接收远程鼠标位移"}else{"Receiving remote mouse deltas"}).into(),
             InputHookFailed(e) => format!("{}: {e}", if zh {"输入捕获启动失败"} else {"Input capture failed"}),
             ClipboardRemoteEmpty => (if zh {"远端剪贴板没有可用纯文本"} else {"No plain text available in remote clipboard"}).into(),
         }

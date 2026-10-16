@@ -175,6 +175,7 @@ mod tests {
             socket.set_nonblocking(true).unwrap();
             let (tx,rx,_socket,reason)=connect(socket,"0123456789abcdef0123456789abcdef",false).unwrap();
             tx.send(Wire::Hello{os:Platform::Mac,screen:Screen::new(1440,900)}).unwrap();
+            tx.send(Wire::EnterAck{accepted:true}).unwrap();
             match rx.recv_timeout(Duration::from_secs(3)).unwrap(){
                 Wire::MoveBy{dx:7,dy:-4}=>{},
                 msg=>panic!("unexpected receiver packet: {msg:?}, reason={:?}",reason.lock().unwrap()),
@@ -190,6 +191,10 @@ mod tests {
             }
             msg=>panic!("unexpected initial packet: {msg:?}, reason={:?}",reason.lock().unwrap()),
         }
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            Wire::EnterAck{accepted:true}
+        ));
         // Both encrypted reader threads must survive a quiet interval.
         // Previously a nonblocking accepted socket died immediately here.
         std::thread::sleep(Duration::from_millis(80));

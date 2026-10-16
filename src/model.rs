@@ -133,6 +133,17 @@ mod tests {
         assert_eq!(s.language,Language::Zh);
         assert!(s.auto_start_receiver);
     }
+    #[test] fn vertical_offset_and_edge_transfer(){
+        let local=Screen::new(1920,1080);
+        let remote=Screen::new(1440,900);
+        let top=Layout{side:Side::Top,offset:150};
+        assert!(top.entering(250,0,local,remote));
+        assert!(!top.entering(50,0,local,remote));
+        assert_eq!(top.entry(250,0,local,remote),(100,remote.h-4));
+        let bottom=Layout{side:Side::Bottom,offset:-90};
+        assert!(bottom.entering(150,1079,local,remote));
+        assert_eq!(bottom.entry(150,1079,local,remote),(240,3));
+    }
     #[test] fn each_direction(){
         let a=Screen::new(1920,1080); let b=Screen::new(1440,900);
         for s in [Side::Left,Side::Right,Side::Top,Side::Bottom] {

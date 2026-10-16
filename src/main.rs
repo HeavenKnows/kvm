@@ -385,7 +385,7 @@ impl eframe::App for KvmApp {
                 ui.label(format!("{}: {}", tr(lang,"状态","Status"),status_text));
                 if ui.button(tr(lang,"复制诊断信息","Copy diagnostics")).clicked(){
                     let diagnostic=format!(
-                        "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nStatus: {}",
+                        "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nNative mouse packets: {}\nStatus: {}",
                         env!("CARGO_PKG_VERSION"),
                         std::env::consts::OS,
                         if self.settings.role_server {"receiver"} else {"controller"},
@@ -393,6 +393,7 @@ impl eframe::App for KvmApp {
                         self.settings.listen_port,
                         self.state.started.load(Ordering::SeqCst),
                         self.state.ready.load(Ordering::SeqCst),
+                        self.state.native_motion_packets.load(Ordering::Relaxed),
                         status.text(Language::En)
                     );
                     let history=self.state.history.lock().unwrap().iter()
