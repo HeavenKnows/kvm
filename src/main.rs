@@ -6,6 +6,8 @@ mod input;
 mod engine;
 mod status;
 mod network;
+#[cfg(target_os="macos")]
+mod macos_tray;
 
 use eframe::egui;
 use model::{Language, Layout, Settings, Side};
@@ -89,12 +91,28 @@ struct KvmApp {
     settings: Settings,
     state: Arc<engine::Shared>,
     ips: Vec<Ipv4Addr>,
+    #[cfg(target_os="macos")]
+    tray: Option<macos_tray::MacMenuBar>,
 }
 impl KvmApp {
-    fn new(mut settings: Settings) -> Self {
+    fn new(mut settings: Settings, ctx: &egui::Context) -> Self {
         if settings.secret.len() != 32 { settings.secret = generate_secret(); }
         let state = engine::Shared::new(&settings);
-        Self { settings, state, ips: network::local_ipv4_addresses() }
+        #[cfg(target_os="macos")]
+        let tray = match macos_tray::MacMenuBar::new(ctx, settings.language) {
+            Ok(tray) => Some(tray),
+            Err(e) => {
+                eprintln!("Failed to create status bar icon: {e}");
+                // Never strand the user with an invisible window and no menu.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.request_repaint();
+                None
+            }
+        };
+        Self { settings, state, ips: network::local_ipv4_addresses(),
+            #[cfg(target_os="macos")]
+            tray,
+        }
     }
     fn persist_settings(&self) { model::save(&self.settings); }
 
@@ -176,6 +194,17 @@ impl KvmApp {
 
 impl eframe::App for KvmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os="macos")]
+        {
+            if let Some(tray) = &mut self.tray {
+                tray.set_language(self.settings.language);
+                if ctx.input(|i| i.viewport().close_requested()) && !tray.quitting() {
+                    // Closing Settings hides it; the menu bar keeps KVM running.
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("kvm 0.3.2");
@@ -281,6 +310,11 @@ impl eframe::App for KvmApp {
                     engine::start_client(self.state.clone(),self.settings.clone());
                 }
             }
+            if started && !self.state.ready.load(Ordering::Relaxed) && !self.settings.role_server {
+                ui.small(tr(lang,
+                    "正在尝试连接：TCP 最长约 4 秒，配对和接收端响应也有超时。",
+                    "Connecting: TCP up to 4 seconds; pairing and receiver response are also time-limited."));
+            }
             let status = self.state.status.lock().unwrap().clone();
             ui.label(format!("{}: {}", tr(lang,"状态","Status"), status.text(lang)));
             if self.state.active.load(Ordering::Relaxed) {
@@ -297,12 +331,14 @@ impl eframe::App for KvmApp {
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 730.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 730.0])
+            // Agent mode: start with a status bar item; open settings from its menu.
+            .with_visible(!cfg!(target_os="macos")),
         ..Default::default()
     };
     eframe::run_native("kvm",options,
         Box::new(|cc| {
             install_chinese_font(&cc.egui_ctx);
-            Ok(Box::new(KvmApp::new(model::load())))
+            Ok(Box::new(KvmApp::new(model::load(), &cc.egui_ctx)))
         }))
 }
