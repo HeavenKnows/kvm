@@ -56,13 +56,19 @@ mod mac {
         unsafe{CGEventPost(0,event);CFRelease(event);}
         Ok(())
     }
+    static ORIGIN_X:std::sync::atomic::AtomicI32=std::sync::atomic::AtomicI32::new(0);
+    static ORIGIN_Y:std::sync::atomic::AtomicI32=std::sync::atomic::AtomicI32::new(0);
+    pub fn set_origin(x:i32,y:i32){
+        use std::sync::atomic::Ordering;
+        ORIGIN_X.store(x,Ordering::Relaxed);
+        ORIGIN_Y.store(y,Ordering::Relaxed);
+    }
     fn global_point(x:i32,y:i32)->Point{
-        static ORIGIN:std::sync::OnceLock<(i32,i32)>=std::sync::OnceLock::new();
-        let &(ox,oy)=ORIGIN.get_or_init(||{
-            let d=crate::display::current();
-            (d.origin_x,d.origin_y)
-        });
-        Point{x:(ox+x) as f64,y:(oy+y) as f64}
+        use std::sync::atomic::Ordering;
+        Point{
+            x:(ORIGIN_X.load(Ordering::Relaxed)+x) as f64,
+            y:(ORIGIN_Y.load(Ordering::Relaxed)+y) as f64,
+        }
     }
     pub fn trusted()->bool{unsafe{AXIsProcessTrusted()}}
     pub fn click(button:rdev::Button,pressed:bool,x:i32,y:i32)->Result<(),String>{
@@ -103,6 +109,13 @@ mod mac {
         let code=unsafe{CGWarpMouseCursorPosition(point)};
         if code==0{Ok(())}else{Err(format!("macOS cursor warp failed: CGError {code}"))}
     }
+}
+/// Update macOS global-coordinate origin after the background monitor scan.
+pub fn set_global_origin(x:i32,y:i32){
+    #[cfg(target_os="macos")]
+    {mac::set_origin(x,y);}
+    #[cfg(not(target_os="macos"))]
+    {let _=(x,y);}
 }
 pub fn screen_size()->(i32,i32){
     #[cfg(target_os="macos")]
