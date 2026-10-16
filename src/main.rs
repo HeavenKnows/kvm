@@ -316,6 +316,12 @@ impl eframe::App for KvmApp {
                 if previous != self.settings.language { self.persist_settings(); }
             });
             let lang = self.settings.language;
+            #[cfg(target_os="macos")]
+            if self.tray.is_none() {
+                ui.colored_label(egui::Color32::YELLOW,tr(lang,
+                    "菜单栏图标启动失败；设置窗口会保持可用。关闭窗口将退出程序。",
+                    "Menu bar icon failed to start. Settings remains usable; closing this window exits the app."));
+            }
             ui.label(tr(lang,
                 "安全的局域网键盘鼠标共享 · Windows ↔ macOS",
                 "Secure LAN keyboard and mouse sharing · Windows ↔ macOS"));
@@ -509,8 +515,11 @@ impl eframe::App for KvmApp {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 730.0])
-            // Agent mode: start with a status bar item; open settings from its menu.
-            .with_visible(!cfg!(target_os="macos")),
+            // Always show Settings on launch, including macOS agent apps.
+            // The user can close Settings to continue in the menu bar.
+            // Starting hidden can strand users if the status item is missing
+            // or not noticed, so it must never be the unconditional default.
+            .with_visible(true),
         ..Default::default()
     };
     eframe::run_native("kvm",options,

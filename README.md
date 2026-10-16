@@ -77,7 +77,7 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 打开 GitHub 仓库的 **Actions → Build kvm (Windows + macOS) → 最近一次运行 → Artifacts** 下载。
 
 - **Windows**：解压 GitHub 下载的 ZIP，直接双击 `kvm.exe`；已关闭 Windows 控制台窗口。
-- **macOS**：解压 GitHub Artifact ZIP，双击里面的 `.dmg`，将 `kvm.app` 拖到「应用程序」，然后从 Finder 启动。它不需要 Terminal，默认隐藏设置窗口和 Dock 图标，在屏幕顶部菜单栏展示 kvm 图标。点击图标 →「打开设置」可启动接收端或连接控制端；「退出 kvm」才会结束应用。关闭设置窗口不会退出后台进程。**当前不包含开机自动启动或自动连接**。
+- **macOS**：解压 GitHub Artifact ZIP，双击里面的 `.dmg`，将 `kvm.app` 拖到「应用程序」，然后从 Finder 启动。不需要 Terminal，**启动时会显示设置窗口**（避免菜单栏图标不可见时完全无法操作）。平时不占用 Dock，在屏幕顶部菜单栏保留 kvm 图标；关闭设置窗口后继续在后台运行，点击图标 →「打开设置」可以再次打开窗口。「退出 kvm」才会结束进程。如果菜单栏图标创建失败，窗口会显示警告，关闭窗口将正常退出。**当前不包含开机自动启动**。
 - macOS CI 使用 **临时（ad-hoc）代码签名**而不是 Apple Developer ID 签名，也没有 Apple 公证。Gatekeeper 仍可能阻止打开，首次请在「系统设置 → 隐私与安全性」审核该来自可信仓库的构建；全局键鼠控制还需要辅助功能 / 输入监控权限。
 - GitHub 的 Artifact 自身是 ZIP，因此现在下载只有**一个 ZIP 外层**；Windows ZIP 内直接是 exe，Mac ZIP 内直接是 dmg，不再套第二层 ZIP/tar.gz。
 
@@ -196,3 +196,10 @@ macOS 注入鼠标点击前会检查 `AXIsProcessTrusted()`，若尚未授权会
 - 鼠标仅在选择的本机显示器真实暴露的边缘切屏，不会把相邻两块本机显示器之间的边界误判为远端。远端鼠标坐标映射到实际物理显示器；虚拟桌面间的空白区域不作为有效光标区域。
 - 图标资源在 CI 由 `scripts/generate_icon.py` 稳定生成 1024px 图像，Windows 嵌入 ICO 资源，macOS .app 内包含 ICNS 图标并在 Info.plist 注册。图标基于双显示器和跨屏光标轨迹概念，自定义绘制，不包含外部品牌标识。
 - 仍为 beta：必须两端都安装新版本；更换显示器数量、顺序、缩放、排列后请完全退出并重新启动双方。没有完成所有真实多屏拓扑的跨设备硬件测试，也没有 Developer ID 正式签名或 Apple notarization。
+
+## 0.5.0-beta.2 macOS 设置窗口可见性修复
+
+- macOS `kvm.app` 现在**每次新进程启动都打开设置窗口**，不再因 `ViewportBuilder::with_visible(false)` 把唯一可操作界面藏起来。
+- 菜单栏工作方式不变：在菜单栏正常创建时，关闭设置窗口会隐藏窗口并继续在后台接收；菜单栏「打开设置」会重新显示。
+- 如菜单栏初始化失败，设置窗口仍可见并给出警告，不依赖初始化阶段发出的可见性命令；此时关闭窗口正常退出。
+- 仍保留 macOS `LSUIElement=true`，因此不显示 Dock 图标。GitHub Actions 编译通过不等于已经在实体 Mac 验证了第一次启动、窗口隐藏/再次打开完整行为。
