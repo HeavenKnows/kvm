@@ -371,8 +371,7 @@ fn capture(shared:Arc<Shared>) {
     let pressed=Arc::new(Mutex::new(HashSet::<Key>::new()));
     let skip_v=Arc::new(AtomicBool::new(false));
     let skip_f12=Arc::new(AtomicBool::new(false));
-    let pos=Arc::new(Mutex::new(None::<(i32,i32)>));
-    let p=pressed.clone(); let skip=skip_v.clone(); let skip_emergency=skip_f12.clone(); let last=pos.clone();
+    let p=pressed.clone(); let skip=skip_v.clone(); let skip_emergency=skip_f12.clone();
     let me=Platform::local();
     let hook_shared=shared.clone();
     if let Err(e)=rdev::grab(move |event| {
@@ -380,7 +379,7 @@ fn capture(shared:Arc<Shared>) {
             p.lock().unwrap().clear();
             skip.store(false,Ordering::SeqCst);
             skip_emergency.store(false,Ordering::SeqCst);
-            *last.lock().unwrap()=None;
+            *hook_shared.cursor_last.lock().unwrap()=None;
             return Some(event);
         }
         let et=event.event_type.clone();
@@ -423,17 +422,32 @@ fn capture(shared:Arc<Shared>) {
                 if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
             }
             EventType::MouseMove{x,y}=>{
-                let x=x as i32;let y=y as i32;
-                let mut previous=last.lock().unwrap();
-                let delta=previous.map(|(px,py)|(x-px,y-py)).unwrap_or((0,0));
-                *previous=Some((x,y));
+                let (x,y)=(x as i32,y as i32);
+                let mut previous=hook_shared.cursor_last.lock().unwrap();
                 if remote {
-                    if delta!=(0,0) {
+                    let center=cursor::warp_anchor(
+                        hook_shared.local_screen.w,hook_shared.local_screen.h);
+                    // Synthetic event from SetCursorPos/CGWarpMouseCursorPosition
+                    // is not user motion; do not forward its huge edge->center delta.
+                    if (x-center.0).abs()<=1 && (y-center.1).abs()<=1 &&
+                        hook_shared.ignore_warp.swap(false,Ordering::SeqCst) {
+                        *previous=Some(center);
+                        return None;
+                    }
+                    let delta=previous.map(|(px,py)|(x-px,y-py)).unwrap_or((0,0));
+                    *previous=Some((x,y));
+                    drop(previous);
+                    if delta!=(0,0){
                         hook_shared.pending_dx.fetch_add(delta.0.clamp(-200,200),Ordering::Relaxed);
                         hook_shared.pending_dy.fetch_add(delta.1.clamp(-200,200),Ordering::Relaxed);
                     }
+                    if cursor::needs_recentering(x,y,center) {
+                        hook_shared.recenter_requested.store(true,Ordering::SeqCst);
+                    }
                     return None;
                 }
+                *previous=Some((x,y));
+                drop(previous);
                 let layout=*hook_shared.layout.lock().unwrap();
                 let other=*hook_shared.remote_screen.lock().unwrap();
                 if layout.entering(x,y,hook_shared.local_screen,other){
@@ -441,6 +455,9 @@ fn capture(shared:Arc<Shared>) {
                     *hook_shared.entry_local.lock().unwrap()=(x,y);
                     hook_shared.active.store(true,Ordering::SeqCst);
                     hook_shared.send(Wire::Enter{x:rx,y:ry,side:layout.side});
+                    // A warp moves the controller's real cursor away from the
+                    // physical edge so further rightward motion is measurable.
+                    hook_shared.recenter_requested.store(true,Ordering::SeqCst);
                     return None;
                 }
                 return Some(event);
