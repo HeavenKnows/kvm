@@ -24,6 +24,8 @@ pub enum UiStatus {
     HandshakeTimedOut,
     InvalidHandshake,
     InputHookFailed(String),
+    UserDisconnected,
+    Stopped,
 }
 impl UiStatus {
     pub fn text(&self, language: Language) -> String {
@@ -50,6 +52,8 @@ impl UiStatus {
             ClipboardInvalid => (if zh {"收到的剪贴板文本无效或超限"} else {"Received clipboard text is invalid or too large"}).into(),
             HandshakeTimedOut => (if zh {"等待接收端响应超时（5 秒），可重试"} else {"Receiver response timed out after 5 seconds; retry available"}).into(),
             InvalidHandshake => (if zh {"接收端响应无效，请检查版本与配对密钥"} else {"Invalid receiver response; check version and pairing key"}).into(),
+            UserDisconnected => (if zh {"已主动断开"} else {"Disconnected by user"}).into(),
+            Stopped => (if zh {"已停止接收，可重新启动"} else {"Receiver stopped; you can start it again"}).into(),
             InputHookFailed(e) => format!("{}: {e}", if zh {"输入捕获启动失败"} else {"Input capture failed"}),
             ClipboardRemoteEmpty => (if zh {"远端剪贴板没有可用纯文本"} else {"No plain text available in remote clipboard"}).into(),
         }
