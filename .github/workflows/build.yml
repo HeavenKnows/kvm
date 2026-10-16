@@ -7,6 +7,11 @@ on:
 permissions:
   contents: read
 
+# Cancel obsolete branch builds when a newer commit is pushed.
+concurrency:
+  group: kvm-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.name }}
@@ -53,36 +58,59 @@ jobs:
         shell: bash
         run: cargo build --release --target "${{ matrix.target }}"
 
-      - name: Package Windows executable
+      - name: Prepare Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/kvm.exe" "dist/kvm.exe"
-          Compress-Archive -Path "dist/kvm.exe" -DestinationPath "${{ matrix.artifact }}.zip" -Force
 
-      - name: Package macOS executable
+      - name: Bundle macOS menu bar app and DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/kvm" dist/kvm
-          chmod +x dist/kvm
-          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist kvm
+          set -euo pipefail
+          APP="dist/kvm.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp "target/${{ matrix.target }}/release/kvm" "$APP/Contents/MacOS/kvm"
+          chmod 755 "$APP/Contents/MacOS/kvm"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>kvm</string>
+            <key>CFBundleDisplayName</key><string>kvm</string>
+            <key>CFBundleIdentifier</key><string>dev.heavenknows.kvm</string>
+            <key>CFBundleExecutable</key><string>kvm</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.3.3</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>LSUIElement</key><true/>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$APP/Contents/Info.plist"
+          codesign --force --sign - --timestamp=none "$APP"
+          hdiutil create -volname "kvm" -srcfolder "$APP" -ov -format UDZO \
+            "dist/${{ matrix.artifact }}.dmg"
 
-      # upload-artifact@v6 runs on Node.js 24 (v4 is not suitable).
+      # GitHub Artifacts itself downloads as a ZIP. Upload files directly,
+      # rather than uploading a ZIP or tar.gz inside another ZIP.
       - name: Upload Windows build
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
+          path: dist/kvm.exe
           if-no-files-found: error
 
-      - name: Upload macOS build
+      - name: Upload macOS DMG
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.tar.gz
+          path: dist/${{ matrix.artifact }}.dmg
           if-no-files-found: error
