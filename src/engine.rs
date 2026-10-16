@@ -1,4 +1,4 @@
-use crate::{cursor,input, model::{Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
+use crate::{input,native_motion, model::{Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
 use std::{collections::HashSet,net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::Duration};
 const MAX_TEXT:usize=32*1024;
@@ -28,10 +28,8 @@ pub struct Shared {
     pub started:AtomicBool,
     stop_requested:AtomicBool,
     socket:Mutex<Option<TcpStream>>,
-    recenter_requested:AtomicBool,
-    ignore_warp:AtomicBool,
-    cursor_last:Mutex<Option<(i32,i32)>>,
     capture_started:AtomicBool,
+    native_started:AtomicBool,
     paste_sender:Mutex<Option<SyncSender<()>>>,
     pub clipboard:AtomicBool,
     pub remap:AtomicBool,
@@ -53,8 +51,7 @@ impl Shared {
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
             stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
-            recenter_requested:AtomicBool::new(false),ignore_warp:AtomicBool::new(false),
-            cursor_last:Mutex::new(None),
+            native_started:AtomicBool::new(false),
             clipboard:AtomicBool::new(s.clipboard),remap:AtomicBool::new(s.remap),
             owner:Mutex::new(Owner::Local),
             pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
@@ -62,6 +59,20 @@ impl Shared {
         })
     }
     pub fn info(&self,status:UiStatus){*self.status.lock().unwrap()=status;}
+    /// Called by native Windows Raw Input / macOS CGEventTap callbacks.
+    /// Synthetic pointer warps no longer contribute to movement; native physical
+    /// deltas continue arriving even when the OS pointer is at a screen boundary.
+    pub fn add_native_motion(&self,dx:i32,dy:i32) {
+        if !self.ready.load(Ordering::Relaxed) ||
+           !self.active.load(Ordering::Relaxed) { return; }
+        self.pending_dx.fetch_add(dx.clamp(-2000,2000),Ordering::Relaxed);
+        self.pending_dy.fetch_add(dy.clamp(-2000,2000),Ordering::Relaxed);
+    }
+    pub fn native_motion_stopped(&self,error:String){
+        self.native_started.store(false,Ordering::SeqCst);
+        self.shutdown_peer();
+        self.info(UiStatus::InputHookFailed(error));
+    }
     fn store_socket(&self,sock:&TcpStream)->std::io::Result<()> {
         *self.socket.lock().unwrap()=Some(sock.try_clone()?);
         Ok(())
@@ -69,8 +80,6 @@ impl Shared {
     fn shutdown_peer(&self) {
         self.active.store(false,Ordering::SeqCst);
         self.ready.store(false,Ordering::SeqCst);
-        self.recenter_requested.store(false,Ordering::SeqCst);
-        self.ignore_warp.store(false,Ordering::SeqCst);
         if let Some(sock)=self.socket.lock().unwrap().take(){
             let _=sock.shutdown(std::net::Shutdown::Both);
         }
@@ -127,7 +136,6 @@ impl Shared {
         *self.owner.lock().unwrap() = Owner::Local;
         self.pending_dx.store(0,Ordering::Relaxed);
         self.pending_dy.store(0,Ordering::Relaxed);
-        *self.cursor_last.lock().unwrap()=None;
     }
 }
 fn clipboard_get()->Option<String>{
@@ -309,6 +317,14 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     }
 
     if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
+    // Install OS-native mouse capture first, before activating the input grab.
+    // Keep a single background listener across reconnects.
+    if !shared.native_started.swap(true,Ordering::SeqCst){
+        if let Err(e)=native_motion::start(shared.clone()){
+            shared.native_started.store(false,Ordering::SeqCst);
+            return Err(UiStatus::InputHookFailed(e));
+        }
+    }
     let (paste_tx,paste_rx)=mpsc::sync_channel::<()>(16);
     *shared.paste_sender.lock().unwrap()=Some(paste_tx);
     shared.ready.store(true,Ordering::SeqCst);
@@ -331,18 +347,8 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     });
     let motion_shared=shared.clone();
     std::thread::spawn(move ||{
-        while motion_shared.ready.load(Ordering::Relaxed){
+        while motion_shared.ready.load(Ordering::Relaxed) {
             if motion_shared.active.load(Ordering::Relaxed){
-                if motion_shared.recenter_requested.swap(false,Ordering::SeqCst){
-                    let center=cursor::warp_anchor(
-                        motion_shared.local_screen.w,motion_shared.local_screen.h);
-                    motion_shared.ignore_warp.store(true,Ordering::SeqCst);
-                    if cursor::warp(center.0,center.1) {
-                        *motion_shared.cursor_last.lock().unwrap()=Some(center);
-                    } else {
-                        motion_shared.ignore_warp.store(false,Ordering::SeqCst);
-                    }
-                }
                 motion_shared.flush_motion();
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -382,7 +388,6 @@ fn capture(shared:Arc<Shared>) {
             p.lock().unwrap().clear();
             skip.store(false,Ordering::SeqCst);
             skip_emergency.store(false,Ordering::SeqCst);
-            *hook_shared.cursor_last.lock().unwrap()=None;
             return Some(event);
         }
         let et=event.event_type.clone();
@@ -425,42 +430,20 @@ fn capture(shared:Arc<Shared>) {
                 if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
             }
             EventType::MouseMove{x,y}=>{
-                let (x,y)=(x as i32,y as i32);
-                let mut previous=hook_shared.cursor_last.lock().unwrap();
                 if remote {
-                    let center=cursor::warp_anchor(
-                        hook_shared.local_screen.w,hook_shared.local_screen.h);
-                    // Synthetic event from SetCursorPos/CGWarpMouseCursorPosition
-                    // is not user motion; do not forward its huge edge->center delta.
-                    if (x-center.0).abs()<=1 && (y-center.1).abs()<=1 &&
-                        hook_shared.ignore_warp.swap(false,Ordering::SeqCst) {
-                        *previous=Some(center);
-                        return None;
-                    }
-                    let delta=previous.map(|(px,py)|(x-px,y-py)).unwrap_or((0,0));
-                    *previous=Some((x,y));
-                    drop(previous);
-                    if delta!=(0,0){
-                        hook_shared.pending_dx.fetch_add(delta.0.clamp(-200,200),Ordering::Relaxed);
-                        hook_shared.pending_dy.fetch_add(delta.1.clamp(-200,200),Ordering::Relaxed);
-                    }
-                    if cursor::needs_recentering(x,y,center) {
-                        hook_shared.recenter_requested.store(true,Ordering::SeqCst);
-                    }
+                    // Raw Input / CGEventTap sends actual device deltas
+                    // independently from this absolute-position grab hook.
+                    // Suppress local movement while controlling the peer.
                     return None;
                 }
-                *previous=Some((x,y));
-                drop(previous);
+                let (x,y)=(x as i32,y as i32);
                 let layout=*hook_shared.layout.lock().unwrap();
                 let other=*hook_shared.remote_screen.lock().unwrap();
-                if layout.entering(x,y,hook_shared.local_screen,other){
+                if layout.entering(x,y,hook_shared.local_screen,other) {
                     let (rx,ry)=layout.entry(x,y,hook_shared.local_screen,other);
                     *hook_shared.entry_local.lock().unwrap()=(x,y);
                     hook_shared.active.store(true,Ordering::SeqCst);
                     hook_shared.send(Wire::Enter{x:rx,y:ry,side:layout.side});
-                    // A warp moves the controller's real cursor away from the
-                    // physical edge so further rightward motion is measurable.
-                    hook_shared.recenter_requested.store(true,Ordering::SeqCst);
                     return None;
                 }
                 return Some(event);
