@@ -333,7 +333,24 @@ impl eframe::App for KvmApp {
                     "Connecting: TCP up to 4 seconds; pairing and receiver response are also time-limited."));
             }
             let status = self.state.status.lock().unwrap().clone();
-            ui.label(format!("{}: {}", tr(lang,"状态","Status"), status.text(lang)));
+            let status_text=status.text(lang);
+            ui.horizontal_wrapped(|ui|{
+                ui.label(format!("{}: {}", tr(lang,"状态","Status"),status_text));
+                if ui.button(tr(lang,"复制诊断信息","Copy diagnostics")).clicked(){
+                    let diagnostic=format!(
+                        "kvm {}\\nOS: {}\\nRole: {}\\nAddress: {}\\nConfigured listening port: {}\\nSession started: {}\\nNetwork ready: {}\\nStatus: {}",
+                        env!("CARGO_PKG_VERSION"),
+                        std::env::consts::OS,
+                        if self.settings.role_server {"receiver"} else {"controller"},
+                        if self.settings.role_server {"(receiver)"} else {self.settings.address.as_str()},
+                        self.settings.listen_port,
+                        self.state.started.load(Ordering::SeqCst),
+                        self.state.ready.load(Ordering::SeqCst),
+                        status.text(Language::En)
+                    );
+                    ui.ctx().copy_text(diagnostic);
+                }
+            });
             if self.state.active.load(Ordering::Relaxed) {
                 ui.colored_label(egui::Color32::LIGHT_GREEN,
                     tr(lang,"正在控制远端 · F12 紧急返回","Remote control active · F12 emergency return"));
