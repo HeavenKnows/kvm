@@ -70,11 +70,12 @@ fn handshake(s:&mut TcpStream, secret:&str,initiator:bool)->io::Result<snow::Tra
 /// Reader and writer use separate cloned TcpStream handles, sharing Noise sequence state briefly.
 /// Hook callbacks only ever enqueue; no socket IO, crypto, or clipboard work on hook thread.
 pub fn connect(mut stream:TcpStream,secret:&str,initiator:bool)
-    ->io::Result<(SyncSender<Wire>,Receiver<Wire>)>
+    ->io::Result<(SyncSender<Wire>,Receiver<Wire>,TcpStream)>
 {
     stream.set_nodelay(true)?;
     let noise=Arc::new(Mutex::new(handshake(&mut stream,secret,initiator)?));
     let mut writer=stream.try_clone()?;
+    let control=stream.try_clone()?;
     let (tx,tx_rx)=mpsc::sync_channel::<Wire>(2048);
     let (rx_tx,rx)=mpsc::sync_channel::<Wire>(2048);
     let cipher=noise.clone();
@@ -98,5 +99,5 @@ pub fn connect(mut stream:TcpStream,secret:&str,initiator:bool)
         }
         let _=stream.shutdown(std::net::Shutdown::Both);
     });
-    Ok((tx,rx))
+    Ok((tx,rx,control))
 }
