@@ -34,11 +34,9 @@ pub struct Shared {
     pub history:Mutex<VecDeque<String>>,
     fatal_error:Mutex<Option<UiStatus>>,
     pub layout:Mutex<Layout>,
-    pub local_screen:Screen,
-    pub local_displays:Vec<Display>,
+    local_desktop:Mutex<display::Desktop>,
     pub remote_screen:Mutex<Screen>,
     pub remote_displays:Mutex<Vec<Display>>,
-    pub virtual_origin:(i32,i32),
     pub local_display_index:std::sync::atomic::AtomicUsize,
     pub remote_display_index:std::sync::atomic::AtomicUsize,
     pub target:Mutex<Platform>,
@@ -72,18 +70,18 @@ pub struct Shared {
 }
 impl Shared {
     pub fn new(s:&Settings)->Arc<Self>{
-        let desktop=display::current();
+        // No CoreGraphics/monitor enumeration here: KvmApp::new runs on
+        // the native GUI thread and must be nonblocking with external screens.
+        let desktop=display::Desktop::fallback();
         let (w,h)=(desktop.screen().w,desktop.screen().h);
         Arc::new(Self {
             is_receiver:AtomicBool::new(s.role_server),
             status:Mutex::new(UiStatus::Idle),
             history:Mutex::new(VecDeque::with_capacity(32)),fatal_error:Mutex::new(None),
             layout:Mutex::new(s.layout),
-            local_screen:Screen::new(w,h),
-            local_displays:desktop.displays,
+            local_desktop:Mutex::new(desktop),
             remote_screen:Mutex::new(Screen::new(1920,1080)),
             remote_displays:Mutex::new(model::single_display(Screen::new(1920,1080))),
-            virtual_origin:(desktop.origin_x,desktop.origin_y),
             local_display_index:std::sync::atomic::AtomicUsize::new(s.local_display),
             remote_display_index:std::sync::atomic::AtomicUsize::new(s.remote_display),
             target:Mutex::new(Platform::Mac),active:AtomicBool::new(false),
@@ -106,6 +104,26 @@ impl Shared {
             pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
             entry_local:Mutex::new((w/2,h/2)),out:Mutex::new(None),
         })
+    }
+    pub fn local_desktop(&self)->display::Desktop{
+        self.local_desktop.lock().unwrap().clone()
+    }
+    pub fn local_screen(&self)->Screen{self.local_desktop.lock().unwrap().screen()}
+    pub fn local_displays(&self)->Vec<Display>{
+        self.local_desktop.lock().unwrap().displays.clone()
+    }
+    pub fn virtual_origin(&self)->(i32,i32){
+        let d=self.local_desktop.lock().unwrap();
+        (d.origin_x,d.origin_y)
+    }
+    /// Apply a background monitor scan before a connection starts.
+    /// The session's Hello geometry must not change while a peer is active.
+    pub fn update_local_desktop(&self,desktop:display::Desktop)->bool{
+        if self.started.load(Ordering::SeqCst){return false;}
+        let (w,h)=(desktop.screen().w,desktop.screen().h);
+        *self.local_desktop.lock().unwrap()=desktop;
+        *self.entry_local.lock().unwrap()=(w/2,h/2);
+        true
     }
     pub fn info(&self,status:UiStatus){
         let millis=SystemTime::now().duration_since(UNIX_EPOCH)
@@ -213,12 +231,12 @@ impl Shared {
     fn return_cursor(&self){
         let (mut x,mut y)=*self.entry_local.lock().unwrap();
         match self.layout.lock().unwrap().side {
-            crate::model::Side::Right=>x=self.local_screen.w-75,
+            crate::model::Side::Right=>x=self.local_screen().w-75,
             crate::model::Side::Left=>x=75,
             crate::model::Side::Top=>y=75,
-            crate::model::Side::Bottom=>y=self.local_screen.h-75,
+            crate::model::Side::Bottom=>y=self.local_screen().h-75,
         }
-        let (ox,oy)=self.virtual_origin;
+        let (ox,oy)=self.virtual_origin();
         simulate(EventType::MouseMove{x:(x+ox) as f64,y:(y+oy) as f64});
     }
     fn close(&self){
@@ -316,11 +334,11 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
             *shared.out.lock().unwrap()=Some(tx);
             shared.ready.store(true,Ordering::SeqCst);
             shared.info(UiStatus::ConnectedPeer(peer.to_string()));
-            shared.send(Wire::Hello{os:Platform::local(),screen:shared.local_screen,displays:shared.local_displays.clone()});
-            let mut mouse=(shared.local_screen.w/2,shared.local_screen.h/2);
+            shared.send(Wire::Hello{os:Platform::local(),screen:shared.local_screen(),displays:shared.local_displays().clone()});
+            let mut mouse=(shared.local_screen().w/2,shared.local_screen().h/2);
             let mut pressed=HashSet::<Key>::new();
             let mut buttons=HashSet::<rdev::Button>::new();
-            let mut return_display=shared.local_displays[0];
+            let mut return_display=shared.local_displays()[0];
             let mut armed_return=false;
             let mut first_motion_seen=false;
             let mut entered_at=None::<std::time::Instant>;
@@ -346,8 +364,8 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     Wire::Enter{x,y,side,remote_display}=>{
                         let mut l=*shared.layout.lock().unwrap();l.side=side;
                         *shared.layout.lock().unwrap()=l;
-                        return_display=shared.local_displays.get(remote_display)
-                            .copied().unwrap_or(shared.local_displays[0]);
+                        return_display=shared.local_displays().get(remote_display)
+                            .copied().unwrap_or(shared.local_displays()[0]);
                         if !return_display.contains(x,y) {
                             shared.send(Wire::EnterAck{accepted:false});
                             continue;
@@ -360,8 +378,8 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                                 // Also post a MouseMoved event for app hover state.
                                 if cfg!(target_os="macos"){
                                     simulate(EventType::MouseMove{
-                                    x:(mouse.0+shared.virtual_origin.0) as f64,
-                                    y:(mouse.1+shared.virtual_origin.1) as f64});
+                                    x:(mouse.0+shared.virtual_origin().0) as f64,
+                                    y:(mouse.1+shared.virtual_origin().1) as f64});
                                 }
                                 shared.active.store(true,Ordering::SeqCst);
                                 armed_return=false;
@@ -394,7 +412,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         first_motion_seen=true;
                         entered_at=None;
                         let candidate=(mouse.0.saturating_add(dx),mouse.1.saturating_add(dy));
-                        mouse=model::closest_on_displays(&shared.local_displays,candidate.0,candidate.1);
+                        mouse=model::closest_on_displays(&shared.local_displays(),candidate.0,candidate.1);
                         // A pressed mouse button requires Cocoa dragged events.
                         // Ordinary MouseMoved / cursor warps only update the
                         // pointer; macOS can defer window movement until mouse-up.
@@ -416,8 +434,8 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         }
                         if held.is_none() && cfg!(target_os="macos"){
                             simulate(EventType::MouseMove{
-                                    x:(mouse.0+shared.virtual_origin.0) as f64,
-                                    y:(mouse.1+shared.virtual_origin.1) as f64});
+                                    x:(mouse.0+shared.virtual_origin().0) as f64,
+                                    y:(mouse.1+shared.virtual_origin().1) as f64});
                         }
                         // Safe edge-return: derived from the *network cursor
                         // model*, never the injected event observer. Require
@@ -733,14 +751,14 @@ fn capture(shared:Arc<Shared>) {
                     // Suppress local movement while controlling the peer.
                     return None;
                 }
-                let (x,y)=(x as i32-hook_shared.virtual_origin.0,
-                            y as i32-hook_shared.virtual_origin.1);
+                let (x,y)=(x as i32-hook_shared.virtual_origin()().0,
+                            y as i32-hook_shared.virtual_origin()().1);
                 let layout=*hook_shared.layout.lock().unwrap();
                 let remote=hook_shared.remote_displays.lock().unwrap();
                 let local_idx=hook_shared.local_display_index.load(Ordering::Relaxed);
                 let remote_idx=hook_shared.remote_display_index.load(Ordering::Relaxed);
                 let entry=model::entering_multi(layout,x,y,
-                    &hook_shared.local_displays,&remote,local_idx,remote_idx);
+                    &hook_shared.local_displays()(),&remote,local_idx,remote_idx);
                 drop(remote);
                 if !hook_shared.pending_enter.load(Ordering::Relaxed){
                     if let Some((rx,ry))=entry{
