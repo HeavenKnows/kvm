@@ -45,6 +45,10 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Run Rust unit tests
+        shell: bash
+        run: cargo test --target "${{ matrix.target }}"
+
       - name: Build optimized binary
         shell: bash
         run: cargo build --release --target "${{ matrix.target }}"
