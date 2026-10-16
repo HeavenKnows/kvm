@@ -100,7 +100,7 @@ impl KvmApp {
         if settings.secret.len() != 32 { settings.secret = generate_secret(); }
         let state = engine::Shared::new(&settings);
         #[cfg(target_os="macos")]
-        let tray = match macos_tray::MacMenuBar::new(ctx, settings.language) {
+        let tray = match macos_tray::MacMenuBar::new(ctx, settings.language, state.clone()) {
             Ok(tray) => Some(tray),
             Err(e) => {
                 eprintln!("Failed to create status bar icon: {e}");
