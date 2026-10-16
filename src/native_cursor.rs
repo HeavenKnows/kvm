@@ -35,6 +35,28 @@ mod mac {
             _=>None,
         }
     }
+    // CGEventType: MouseMoved=5, LeftDragged=6, RightDragged=7,
+    // OtherDragged=27. Cocoa needs drag events while the button stays held.
+    fn movement_kind(held:Option<rdev::Button>)->(u32,u32){
+        match held {
+            Some(rdev::Button::Left)=>(6,0),
+            Some(rdev::Button::Right)=>(7,1),
+            Some(rdev::Button::Middle)=>(27,2),
+            _=>(5,0),
+        }
+    }
+    pub fn motion_while_held(x:i32,y:i32,button:rdev::Button)->Result<(),String>{
+        if !trusted(){return Err("macOS Accessibility permission is not granted".into());}
+        let (kind,which)=movement_kind(Some(button));
+        let rect=unsafe{CGDisplayBounds(CGMainDisplayID())};
+        let pos=Point{x:rect.origin.x+x as f64,y:rect.origin.y+y as f64};
+        let event=unsafe{CGEventCreateMouseEvent(std::ptr::null(),kind,pos,which)};
+        if event.is_null(){return Err(format!("CGEventCreateMouseEvent for drag type {kind} failed"));}
+        // Do not warp during a held drag: CGEventPost dispatches actual
+        // LeftMouseDragged/RightMouseDragged to the destination window.
+        unsafe{CGEventPost(0,event);CFRelease(event);}
+        Ok(())
+    }
     pub fn trusted()->bool{unsafe{AXIsProcessTrusted()}}
     pub fn click(button:rdev::Button,pressed:bool,x:i32,y:i32)->Result<(),String>{
         if !trusted() {
@@ -61,6 +83,10 @@ mod mac {
             assert_eq!(button_mapping(rdev::Button::Right,false),Some((4,1)));
             assert_eq!(button_mapping(rdev::Button::Middle,true),Some((25,2)));
             assert_eq!(button_mapping(rdev::Button::Middle,false),Some((26,2)));
+            assert_eq!(movement_kind(Some(rdev::Button::Left)),(6,0));
+            assert_eq!(movement_kind(Some(rdev::Button::Right)),(7,1));
+            assert_eq!(movement_kind(Some(rdev::Button::Middle)),(27,2));
+            assert_eq!(movement_kind(None),(5,0));
         }
     }
     pub fn dimensions()->(i32,i32){
@@ -109,4 +135,12 @@ pub fn accessibility_trusted()->bool{
     {mac::trusted()}
     #[cfg(not(target_os="macos"))]
     {true}
+}
+
+/// Send a native mouse drag event on every motion update while a button is held.
+pub fn drag_to(x:i32,y:i32,button:rdev::Button)->Result<(),String>{
+    #[cfg(target_os="macos")]
+    {return mac::motion_while_held(x,y,button);}
+    #[cfg(not(target_os="macos"))]
+    {let _=button;move_to(x,y)}
 }

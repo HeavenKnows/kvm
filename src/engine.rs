@@ -1,6 +1,6 @@
 use crate::{input,native_cursor,native_motion, model::{Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
-use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::{Duration,SystemTime,UNIX_EPOCH}};
+use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,AtomicU32,AtomicU64,Ordering},mpsc::{self,SyncSender}},time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
 const MAX_TEXT:usize=32*1024;
 
 #[derive(Clone,Copy,PartialEq,Eq,Debug)]
@@ -16,6 +16,18 @@ fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
     }
 }
 
+#[derive(Default)]
+struct MotionScale {x:f32,y:f32}
+impl MotionScale{
+    fn scale(&mut self,dx:i32,dy:i32,gain:f32)->(i32,i32){
+        let gain=if gain.is_finite(){gain.clamp(0.5,4.0)}else{1.6};
+        let vx=dx.clamp(-2000,2000) as f32*gain+self.x;
+        let vy=dy.clamp(-2000,2000) as f32*gain+self.y;
+        let x=vx.trunc() as i32;let y=vy.trunc() as i32;
+        self.x=vx-x as f32;self.y=vy-y as f32;
+        (x,y)
+    }
+}
 pub struct Shared {
     is_receiver:AtomicBool,
     pub status:Mutex<UiStatus>,
@@ -34,6 +46,10 @@ pub struct Shared {
     pub mouse_down_received:std::sync::atomic::AtomicU64,
     pub mouse_up_received:std::sync::atomic::AtomicU64,
     pub mouse_injection_failures:std::sync::atomic::AtomicU64,
+    pub motion_gain:AtomicU32,
+    motion_fraction:Mutex<MotionScale>,
+    pub rtt_ms:AtomicU64,
+    clock:Instant,
     pub ready:AtomicBool,
     pub started:AtomicBool,
     stop_requested:AtomicBool,
@@ -67,6 +83,9 @@ impl Shared {
             mouse_down_received:std::sync::atomic::AtomicU64::new(0),
             mouse_up_received:std::sync::atomic::AtomicU64::new(0),
             mouse_injection_failures:std::sync::atomic::AtomicU64::new(0),
+            motion_gain:AtomicU32::new(s.mouse_speed.to_bits()),
+            motion_fraction:Mutex::new(MotionScale::default()),
+            rtt_ms:AtomicU64::new(u64::MAX),clock:Instant::now(),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
             stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
@@ -102,8 +121,10 @@ impl Shared {
         if !self.ready.load(Ordering::Relaxed) ||
            !self.active.load(Ordering::Relaxed) { return; }
         self.native_motion_packets.fetch_add(1,Ordering::Relaxed);
-        self.pending_dx.fetch_add(dx.clamp(-2000,2000),Ordering::Relaxed);
-        self.pending_dy.fetch_add(dy.clamp(-2000,2000),Ordering::Relaxed);
+        let gain=f32::from_bits(self.motion_gain.load(Ordering::Relaxed));
+        let (dx,dy)=self.motion_fraction.lock().unwrap().scale(dx,dy,gain);
+        self.pending_dx.fetch_add(dx,Ordering::Relaxed);
+        self.pending_dy.fetch_add(dy,Ordering::Relaxed);
     }
     #[cfg(target_os="windows")]
     pub fn add_native_button(&self,button:rdev::Button,pressed:bool){
@@ -116,6 +137,10 @@ impl Shared {
             self.mouse_up_captured.fetch_add(1,Ordering::Relaxed);
             self.send(Wire::Input(EventType::ButtonRelease(button)));
         }
+    }
+    pub fn set_mouse_speed(&self,gain:f32){
+        self.motion_gain.store(gain.clamp(0.5,4.0).to_bits(),Ordering::Relaxed);
+        *self.motion_fraction.lock().unwrap()=MotionScale::default();
     }
     pub fn native_motion_stopped(&self,error:String){
         self.native_started.store(false,Ordering::SeqCst);
@@ -131,6 +156,7 @@ impl Shared {
         self.pending_enter.store(false,Ordering::SeqCst);
         *self.pending_enter_since.lock().unwrap()=None;
         self.ready.store(false,Ordering::SeqCst);
+        self.rtt_ms.store(u64::MAX,Ordering::Relaxed);
         if let Some(sock)=self.socket.lock().unwrap().take(){
             let _=sock.shutdown(std::net::Shutdown::Both);
         }
@@ -188,6 +214,7 @@ impl Shared {
         *self.owner.lock().unwrap() = Owner::Local;
         self.pending_dx.store(0,Ordering::Relaxed);
         self.pending_dy.store(0,Ordering::Relaxed);
+        *self.motion_fraction.lock().unwrap()=MotionScale::default();
     }
 }
 fn clipboard_get()->Option<String>{
@@ -330,7 +357,12 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         shared.active.store(false,Ordering::SeqCst);
                         entered_at=None;
                         for k in pressed.drain(){simulate(EventType::KeyRelease(k));}
-                        for b in buttons.drain(){simulate(EventType::ButtonRelease(b));}
+                        for b in buttons.drain(){
+                            if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
+                                shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
+                                shared.info(UiStatus::InputHookFailed(e));
+                            }
+                        }
                     }
                     Wire::MoveBy{dx,dy} if shared.active.load(Ordering::Relaxed)=>{
                         if dx==0 && dy==0{continue;}
@@ -339,19 +371,33 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         entered_at=None;
                         mouse.0=(mouse.0.saturating_add(dx)).clamp(0,shared.local_screen.w-1);
                         mouse.1=(mouse.1.saturating_add(dy)).clamp(0,shared.local_screen.h-1);
-                        if let Err(e)=native_cursor::move_to(mouse.0,mouse.1){
+                        // A pressed mouse button requires Cocoa dragged events.
+                        // Ordinary MouseMoved / cursor warps only update the
+                        // pointer; macOS can defer window movement until mouse-up.
+                        let held=if buttons.contains(&rdev::Button::Left){
+                            Some(rdev::Button::Left)
+                        }else if buttons.contains(&rdev::Button::Right){
+                            Some(rdev::Button::Right)
+                        }else if buttons.contains(&rdev::Button::Middle){
+                            Some(rdev::Button::Middle)
+                        }else{None};
+                        let moved=if let Some(button)=held{
+                            native_cursor::drag_to(mouse.0,mouse.1,button)
+                        }else{native_cursor::move_to(mouse.0,mouse.1)};
+                        if let Err(e)=moved{
                             shared.active.store(false,Ordering::SeqCst);
                             shared.info(UiStatus::InputHookFailed(e));
                             shared.send(Wire::Back);
                             continue;
                         }
-                        if cfg!(target_os="macos"){
+                        if held.is_none() && cfg!(target_os="macos"){
                             simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
                         }
                         // Safe edge-return: derived from the *network cursor
                         // model*, never the injected event observer. Require
                         // moving inward first so entry at x=3 cannot return.
                         let layout=*shared.layout.lock().unwrap();
+                        if !buttons.is_empty(){continue;} // Never return during a drag.
                         if !armed_return && layout.inward(mouse.0,mouse.1,shared.local_screen){
                             armed_return=true;
                         }else if armed_return && layout.returning(mouse.0,mouse.1,shared.local_screen){
@@ -359,7 +405,12 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                             shared.send(Wire::Back);
                             shared.info(UiStatus::Returned);
                             for k in pressed.drain(){simulate(EventType::KeyRelease(k));}
-                            for b in buttons.drain(){simulate(EventType::ButtonRelease(b));}
+                            for b in buttons.drain(){
+                            if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
+                                shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
+                                shared.info(UiStatus::InputHookFailed(e));
+                            }
+                        }
                         }
                     }
                     Wire::Input(evt) if shared.active.load(Ordering::Relaxed)=>{
@@ -397,11 +448,17 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         if clipboard_set(&text){paste_hotkey(Platform::local());}
                     }
                     Wire::ClipboardRequest=>shared.send(Wire::ClipboardReply(clipboard_get())),
+                    Wire::Ping(tick)=>shared.send(Wire::Pong(tick)),
                     _=>{}
                 }
             }
             for k in pressed {simulate(EventType::KeyRelease(k));}
-            for b in buttons {simulate(EventType::ButtonRelease(b));}
+            for b in buttons {
+                if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
+                    shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
+                    shared.info(UiStatus::InputHookFailed(e));
+                }
+            }
             let detail=Shared::transport_reason(&fault);
             shared.close();
             if !shared.stop_requested.load(Ordering::SeqCst) {
@@ -498,7 +555,12 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     });
     let motion_shared=shared.clone();
     std::thread::spawn(move ||{
+        let mut last_probe=Instant::now()-Duration::from_secs(1);
         while motion_shared.ready.load(Ordering::Relaxed) {
+            if last_probe.elapsed()>=Duration::from_secs(1){
+                last_probe=Instant::now();
+                motion_shared.send(Wire::Ping(motion_shared.clock.elapsed().as_millis() as u64));
+            }
             if motion_shared.active.load(Ordering::Relaxed){
                 motion_shared.flush_motion();
             }
@@ -518,6 +580,12 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     for msg in rx {
         if shared.stop_requested.load(Ordering::SeqCst){break;}
         match msg {
+            Wire::Pong(tick)=>{
+                let current=shared.clock.elapsed().as_millis() as u64;
+                if current>=tick{
+                    shared.rtt_ms.store(current-tick,Ordering::Relaxed);
+                }
+            }
             Wire::EnterAck{accepted}=>{
                 if shared.pending_enter.swap(false,Ordering::SeqCst){
                     *shared.pending_enter_since.lock().unwrap()=None;
@@ -669,6 +737,13 @@ fn capture(shared:Arc<Shared>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn fractional_gain_keeps_subpixel_motion(){
+        let mut m=MotionScale::default();
+        assert_eq!(m.scale(1,0,0.5),(0,0));
+        assert_eq!(m.scale(1,0,0.5),(1,0));
+        assert_eq!(m.scale(10,-4,2.0),(20,-8));
+        assert_eq!(m.scale(100,-100,4.0),(400,-400));
+    }
     #[test] fn paste_on_demand_routing(){
         assert_eq!(paste_action(true,Owner::Local,true),PasteAction::SendLocalClipboard);
         assert_eq!(paste_action(false,Owner::Remote,true),PasteAction::RequestRemoteClipboard);

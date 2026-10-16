@@ -354,6 +354,25 @@ impl eframe::App for KvmApp {
                     "请保持程序运行。macOS 需要授予「辅助功能」和「输入监控」权限。",
                     "Keep the app running. macOS requires Accessibility and Input Monitoring permissions."));
             }
+            if !self.settings.role_server {
+                ui.horizontal(|ui|{
+                    ui.label(tr(lang,"远程鼠标灵敏度","Remote mouse sensitivity"));
+                    if ui.add(egui::Slider::new(&mut self.settings.mouse_speed,0.5..=4.0)
+                        .step_by(0.1).suffix("×")).changed(){
+                        self.state.set_mouse_speed(self.settings.mouse_speed);
+                        self.persist_settings();
+                    }
+                });
+                ui.small(tr(lang,
+                    "原始位移不含 Windows 系统加速；连接时也可调整。",
+                    "Raw Input bypasses Windows pointer acceleration; adjustable while connected."));
+                let rtt=self.state.rtt_ms.load(Ordering::Relaxed);
+                ui.small(if rtt==u64::MAX{
+                    tr(lang,"网络往返延迟：测量中 / 未连接","Network RTT: measuring / disconnected").to_string()
+                }else{
+                    format!("{}: {rtt} ms",tr(lang,"网络往返延迟","Network RTT"))
+                });
+            }
             ui.separator();
             if ui.add_enabled(!started, egui::Button::new(
                 if self.settings.role_server {tr(lang,"启动接收端","Start receiver")}
@@ -392,7 +411,7 @@ impl eframe::App for KvmApp {
                 ui.label(format!("{}: {}", tr(lang,"状态","Status"),status_text));
                 if ui.button(tr(lang,"复制诊断信息","Copy diagnostics")).clicked(){
                     let diagnostic=format!(
-                        "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
+                        "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nNetwork RTT: {:?} ms\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
                         env!("CARGO_PKG_VERSION"),
                         std::env::consts::OS,
                         if self.settings.role_server {"receiver"} else {"controller"},
@@ -400,6 +419,8 @@ impl eframe::App for KvmApp {
                         self.settings.listen_port,
                         self.state.started.load(Ordering::SeqCst),
                         self.state.ready.load(Ordering::SeqCst),
+                        self.settings.mouse_speed,
+                        {let v=self.state.rtt_ms.load(Ordering::Relaxed);if v==u64::MAX{None}else{Some(v)}},
                         self.state.native_motion_packets.load(Ordering::Relaxed),
                         self.state.mouse_down_captured.load(Ordering::Relaxed),
                         self.state.mouse_up_captured.load(Ordering::Relaxed),

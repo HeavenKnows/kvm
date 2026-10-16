@@ -18,6 +18,9 @@ pub enum Wire {
     Back,
     Input(EventType),
     MoveBy { dx:i32, dy:i32 },
+    /// Diagnostic probe for the encrypted LAN transport.
+    Ping(u64),
+    Pong(u64),
     /// Text only; receiver sets clipboard before injecting V.
     PasteRemote(String),
     /// Request remote clipboard for a local paste.
@@ -223,5 +226,16 @@ mod button_wire_tests {
                 _=>panic!("button input wire event lost")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod network_probe_tests{
+    use super::*;
+    #[test] fn ping_pong_serialize(){
+        let ping=rmp_serde::to_vec(&Wire::Ping(42)).unwrap();
+        let pong=rmp_serde::to_vec(&Wire::Pong(42)).unwrap();
+        assert!(matches!(rmp_serde::from_slice::<Wire>(&ping).unwrap(),Wire::Ping(42)));
+        assert!(matches!(rmp_serde::from_slice::<Wire>(&pong).unwrap(),Wire::Pong(42)));
     }
 }

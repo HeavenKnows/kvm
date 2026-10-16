@@ -86,12 +86,15 @@ pub struct Settings {
     pub language: Language,
     pub listen_port: u16,
     pub auto_start_receiver: bool,
+    /// Multiplier for unaccelerated device-count deltas on the controller.
+    pub mouse_speed:f32,
 }
 impl Default for Settings {
     fn default()->Self { Self {
         role_server: false, address:"192.168.1.10:24881".into(),
         secret:String::new(), layout:Layout::default(), remap:true, clipboard:true,
         language:Language::Zh, listen_port:24881, auto_start_receiver:true,
+        mouse_speed:1.6,
     } }
 }
 
@@ -106,7 +109,13 @@ pub fn load()->Settings {
     new_path.and_then(|p| std::fs::read(p).ok())
         .or_else(|| legacy_path.and_then(|p| std::fs::read(p).ok()))
         .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
-        .map(|mut s| { if s.listen_port < 1024 {s.listen_port = 24881;} s })
+        .map(|mut s| {
+            if s.listen_port < 1024 {s.listen_port=24881;}
+            if !s.mouse_speed.is_finite() || !(0.5..=4.0).contains(&s.mouse_speed) {
+                s.mouse_speed=1.6;
+            }
+            s
+        })
         .unwrap_or_default()
 }
 pub fn save(s:&Settings){
@@ -132,6 +141,7 @@ mod tests {
         assert_eq!(s.listen_port,24881);
         assert_eq!(s.language,Language::Zh);
         assert!(s.auto_start_receiver);
+        assert_eq!(s.mouse_speed,1.6);
     }
     #[test] fn vertical_offset_and_edge_transfer(){
         let local=Screen::new(1920,1080);
