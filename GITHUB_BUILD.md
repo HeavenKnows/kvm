@@ -14,31 +14,21 @@
 
 不要只加入 `actions/setup-node@v4` 或 `node-version: 24` 来处理这个报错；该设置**不会改变其他 action 在 `action.yml` 中声明的 Node.js 运行时**。
 
-## 上传或替换仓库文件
+## 通过 GitHub 自动编译和下载
 
-1. 打开你已有的 **`kvm`** GitHub 仓库。
-2. 替换仓库根目录的 `Cargo.toml`、`README.md`、`GITHUB_BUILD.md`、`.github/workflows/build.yml`、`src/main.rs` 和 `src/model.rs`（如果从以前的源码升级）。
-3. 确保仓库根目录有 `Cargo.toml`，并且名称为 `kvm`；不要把这些文件放进多出来的一层目录。
-4. 提交后进入 GitHub 的 **Actions → Build kvm (Windows + macOS)**；`push` 会自动启动，也可以点击 **Run workflow** 手动触发。
-5. 进入一次运行记录，成功后从 **Artifacts** 下载平台产物。
+仓库的 `.github/workflows/build.yml` 会在 push 后自动进行三平台 `cargo test` 和 Release 构建。请从仓库的 **Actions → Build kvm (Windows + macOS)** 选择最新一个绿色成功的运行，滑到 **Artifacts** 下载：
 
-若你已有 Git 本地仓库，在其根目录完成文件替换后：
-
-```bash
-git add Cargo.toml README.md GITHUB_BUILD.md .github/workflows/build.yml src/main.rs src/model.rs
-git commit -m "Fix Node 24 actions, rename kvm and correct docs"
-git push
-```
-
-## 构建矩阵
-
-| runner | target | Artifact 名称 | 内部文件 |
+| Runner | Target | GitHub Artifact | ZIP 内文件 |
 | --- | --- | --- | --- |
-| `windows-2025` | `x86_64-pc-windows-msvc` | `kvm-windows-x64` | `kvm-windows-x64.zip` → `kvm.exe` |
-| `macos-15` | `aarch64-apple-darwin` | `kvm-macos-arm64` | `kvm-macos-arm64.tar.gz` → `kvm` |
-| `macos-15-intel` | `x86_64-apple-darwin` | `kvm-macos-intel` | `kvm-macos-intel.tar.gz` → `kvm` |
+| Windows 2025 | x86_64-pc-windows-msvc | kvm-windows-x64 | `kvm.exe` |
+| macOS Apple Silicon | aarch64-apple-darwin | kvm-macos-arm64 | `kvm-macos-arm64.dmg` |
+| macOS Intel | x86_64-apple-darwin | kvm-macos-intel | `kvm-macos-intel.dmg` |
 
-GitHub 下载 Artifact 时有时还会包一层 ZIP，解压后才是表中打包文件。
+**只需解压一次 GitHub Artifact ZIP**：Windows 直接双击 `kvm.exe`；Mac 双击 `.dmg` 后把 `kvm.app` 拖到「应用程序」。`.app` 是菜单栏代理应用（`LSUIElement=true`）：默认没有 Dock 图标，也不需要常驻终端；点击顶部 kvm 图标 →「打开设置」配置连接，或「退出 kvm」真正结束进程。
+
+macOS 的构建仅采用 ad-hoc 签名，**没有 Developer ID 签名和 Apple 公证**，首次启动可能需要到系统设置确认；键鼠输入还需要辅助功能/输入监控授权。
+
+若使用本地 `cargo run`，它并非 Finder 启动的标准 `.app`，系统权限、Dock 行为与菜单栏体验可能不同，请用打包产物进行实机验收。
 
 ## 仍然失败怎么办？
 
@@ -46,10 +36,10 @@ GitHub 下载 Artifact 时有时还会包一层 ZIP，解压后才是表中打�
 
 - `Check out source` 或 `Upload ...` 提示 Node 20：确认替换后的工作流已经提交到对应分支，并核对 `uses` 是否为 `checkout@v5` 和 `upload-artifact@v6`；如果是其他 action 报错，也需要单独升级。
 - `Build optimized binary` 报 `error[E...]`：这是 Rust 编译/依赖问题，与 Node.js 24 **不是同一问题**。复制第一个完整的 `error` 和对应平台的日志进行定位。
-- `Package ...` 找不到 `kvm.exe` / `kvm`：检查 `Cargo.toml` 的 `[package].name = "kvm"`，以及前一编译步骤是否成功。
+- `Prepare Windows executable` / `Bundle macOS menu bar app and DMG` 找不到程序：检查 `Cargo.toml` 的 `[package].name = "kvm"`，以及前一编译步骤是否成功。
 - 使用了私有 runner：确保 Runner 版本至少为 2.327.1，操作系统也支持 Node.js 24。
 
-**验证说明：** 此工作流已做静态语法及文件路径检查，但还没有在你的 GitHub 仓库真正跑过，因此不能保证当前 Rust 原型在全部平台上编译通过。
+**验证说明：** 以当前 PR 的 GitHub Actions 运行记录为准；即使构建和测试通过，也还需要在真实 Windows/Mac 机器上测试菜单栏恢复设置窗口、输入权限及断线重连。
 
 ## 本地构建
 
