@@ -22,7 +22,6 @@
 | --- | --- | --- | --- |
 | Windows 2025 | x86_64-pc-windows-msvc | kvm-windows-x64 | `kvm.exe` |
 | macOS Apple Silicon | aarch64-apple-darwin | kvm-macos-arm64 | `kvm-macos-arm64.dmg` |
-| macOS Intel | x86_64-apple-darwin | kvm-macos-intel | `kvm-macos-intel.dmg` |
 
 **只需解压一次 GitHub Artifact ZIP**：Windows 直接双击 `kvm.exe`；Mac 双击 `.dmg` 后把 `kvm.app` 拖到「应用程序」。`.app` 是菜单栏代理应用（`LSUIElement=true`）：默认没有 Dock 图标，也不需要常驻终端；点击顶部 kvm 图标 →「打开设置」配置连接，或「退出 kvm」真正结束进程。
 

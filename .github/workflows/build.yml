@@ -28,10 +28,6 @@ jobs:
             os: macos-15
             target: aarch64-apple-darwin
             artifact: kvm-macos-arm64
-          - name: macOS Intel
-            os: macos-15-intel
-            target: x86_64-apple-darwin
-            artifact: kvm-macos-intel
 
     steps:
       # checkout@v5 uses Node.js 24 (checkout@v4 uses Node.js 20).
@@ -84,7 +80,7 @@ jobs:
             <key>CFBundleIdentifier</key><string>dev.heavenknows.kvm</string>
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>0.4.4</string>
+            <key>CFBundleShortVersionString</key><string>0.4.5</string>
             <key>CFBundleVersion</key><string>1</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>

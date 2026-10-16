@@ -29,6 +29,11 @@ pub struct Shared {
     pending_enter:AtomicBool,
     pending_enter_since:Mutex<Option<std::time::Instant>>,
     pub native_motion_packets:std::sync::atomic::AtomicU64,
+    pub mouse_down_captured:std::sync::atomic::AtomicU64,
+    pub mouse_up_captured:std::sync::atomic::AtomicU64,
+    pub mouse_down_received:std::sync::atomic::AtomicU64,
+    pub mouse_up_received:std::sync::atomic::AtomicU64,
+    pub mouse_injection_failures:std::sync::atomic::AtomicU64,
     pub ready:AtomicBool,
     pub started:AtomicBool,
     stop_requested:AtomicBool,
@@ -57,6 +62,11 @@ impl Shared {
             target:Mutex::new(Platform::Mac),active:AtomicBool::new(false),
             pending_enter:AtomicBool::new(false),pending_enter_since:Mutex::new(None),
             native_motion_packets:std::sync::atomic::AtomicU64::new(0),
+            mouse_down_captured:std::sync::atomic::AtomicU64::new(0),
+            mouse_up_captured:std::sync::atomic::AtomicU64::new(0),
+            mouse_down_received:std::sync::atomic::AtomicU64::new(0),
+            mouse_up_received:std::sync::atomic::AtomicU64::new(0),
+            mouse_injection_failures:std::sync::atomic::AtomicU64::new(0),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
             stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
@@ -342,13 +352,34 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     }
                     Wire::Input(evt) if shared.active.load(Ordering::Relaxed)=>{
                         match evt {
-                            EventType::KeyPress(k)=>{pressed.insert(k);},
-                            EventType::KeyRelease(k)=>{pressed.remove(&k);},
-                            EventType::ButtonPress(b)=>{buttons.insert(b);},
-                            EventType::ButtonRelease(b)=>{buttons.remove(&b);},
-                            _=>{}
+                            EventType::ButtonPress(b)=>{
+                                shared.mouse_down_received.fetch_add(1,Ordering::Relaxed);
+                                match native_cursor::button_event(b,true,mouse.0,mouse.1){
+                                    Ok(())=>{buttons.insert(b);},
+                                    Err(e)=>{
+                                        shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
+                                        shared.info(UiStatus::InputHookFailed(e));
+                                    }
+                                }
+                            }
+                            EventType::ButtonRelease(b)=>{
+                                shared.mouse_up_received.fetch_add(1,Ordering::Relaxed);
+                                if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
+                                    shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
+                                    shared.info(UiStatus::InputHookFailed(e));
+                                }
+                                buttons.remove(&b);
+                            }
+                            EventType::KeyPress(k)=>{
+                                pressed.insert(k);
+                                simulate(EventType::KeyPress(k));
+                            }
+                            EventType::KeyRelease(k)=>{
+                                pressed.remove(&k);
+                                simulate(EventType::KeyRelease(k));
+                            }
+                            other=>simulate(other),
                         }
-                        simulate(evt);
                     }
                     Wire::PasteRemote(text) if shared.active.load(Ordering::Relaxed)=>{
                         if clipboard_set(&text){paste_hotkey(Platform::local());}
@@ -563,6 +594,16 @@ fn capture(shared:Arc<Shared>) {
                 p.lock().unwrap().remove(&k);
                 if k==Key::KeyV && skip.swap(false,Ordering::SeqCst){return None;}
                 if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
+            }
+            EventType::ButtonPress(_) if remote => {
+                hook_shared.mouse_down_captured.fetch_add(1,Ordering::Relaxed);
+                hook_shared.send(Wire::Input(et));
+                return None;
+            }
+            EventType::ButtonRelease(_) if remote => {
+                hook_shared.mouse_up_captured.fetch_add(1,Ordering::Relaxed);
+                hook_shared.send(Wire::Input(et));
+                return None;
             }
             EventType::MouseMove{x,y}=>{
                 if remote {

@@ -203,3 +203,25 @@ mod tests {
         responder.join().unwrap();
     }
 }
+
+#[cfg(test)]
+mod button_wire_tests {
+    use super::*;
+    #[test]
+    fn mouse_down_up_roundtrip(){
+        for event in [
+            EventType::ButtonPress(rdev::Button::Left),
+            EventType::ButtonRelease(rdev::Button::Left),
+            EventType::ButtonPress(rdev::Button::Right),
+            EventType::ButtonRelease(rdev::Button::Right),
+            EventType::ButtonPress(rdev::Button::Middle),
+            EventType::ButtonRelease(rdev::Button::Middle)
+        ]{
+            let payload=rmp_serde::to_vec(&Wire::Input(event.clone())).unwrap();
+            match rmp_serde::from_slice::<Wire>(&payload).unwrap(){
+                Wire::Input(decoded)=>assert_eq!(format!("{decoded:?}"),format!("{event:?}")),
+                _=>panic!("button input wire event lost")
+            }
+        }
+    }
+}
