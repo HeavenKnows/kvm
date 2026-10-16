@@ -57,8 +57,8 @@ mod platform {
             }
         };
         let source=match tap.mach_port().create_runloop_source(0){
-            Some(v)=>v,
-            None=>{
+            Ok(v)=>v,
+            Err(())=>{
                 let message="Cannot create macOS CGEventTap run loop source".to_string();
                 let _=ready.send(Err(message.clone()));
                 return Err(message);
