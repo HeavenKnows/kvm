@@ -6,7 +6,7 @@ mod input;
 mod engine;
 mod status;
 mod network;
-mod cursor;
+mod native_motion;
 #[cfg(target_os="macos")]
 mod macos_tray;
 
