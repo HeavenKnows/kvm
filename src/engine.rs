@@ -255,26 +255,88 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
             let mut mouse=(shared.local_screen.w/2,shared.local_screen.h/2);
             let mut pressed=HashSet::<Key>::new();
             let mut buttons=HashSet::<rdev::Button>::new();
-            for msg in rx {
+            let mut armed_return=false;
+            let mut first_motion_seen=false;
+            let mut entered_at=None::<std::time::Instant>;
+            loop {
                 if shared.stop_requested.load(Ordering::SeqCst){break;}
+                let msg=match rx.recv_timeout(Duration::from_millis(80)){
+                    Ok(msg)=>msg,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{
+                        // Fail open: never strand the controller on its screen
+                        // boundary if the receiver does not get MoveBy messages.
+                        if shared.active.load(Ordering::Relaxed) && !first_motion_seen
+                            && entered_at.is_some_and(|t|t.elapsed()>Duration::from_secs(3)){
+                            shared.active.store(false,Ordering::SeqCst);
+                            shared.send(Wire::Back);
+                            shared.info(UiStatus::MouseNoMovement);
+                            entered_at=None;
+                        }
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected)=>break,
+                };
                 match msg {
                     Wire::Enter{x,y,side}=>{
-                        let mut l=*shared.layout.lock().unwrap(); l.side=side;
+                        let mut l=*shared.layout.lock().unwrap();l.side=side;
                         *shared.layout.lock().unwrap()=l;
-                        shared.active.store(true,Ordering::SeqCst);
                         mouse=(x.clamp(3,shared.local_screen.w-4),
                                y.clamp(3,shared.local_screen.h-4));
-                        simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
+                        // CGWarpMouseCursorPosition moves the *visible* macOS
+                        // cursor. Its coordinates must be in logical points.
+                        match native_cursor::move_to(mouse.0,mouse.1){
+                            Ok(())=>{
+                                // Also post a MouseMoved event for app hover state.
+                                if cfg!(target_os="macos"){
+                                    simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
+                                }
+                                shared.active.store(true,Ordering::SeqCst);
+                                armed_return=false;
+                                first_motion_seen=false;
+                                entered_at=Some(std::time::Instant::now());
+                                shared.send(Wire::EnterAck{accepted:true});
+                            }
+                            Err(e)=>{
+                                shared.active.store(false,Ordering::SeqCst);
+                                shared.info(UiStatus::InputHookFailed(e));
+                                shared.send(Wire::EnterAck{accepted:false});
+                            }
+                        }
                     }
                     Wire::Back=>{
                         shared.active.store(false,Ordering::SeqCst);
+                        entered_at=None;
                         for k in pressed.drain(){simulate(EventType::KeyRelease(k));}
                         for b in buttons.drain(){simulate(EventType::ButtonRelease(b));}
                     }
                     Wire::MoveBy{dx,dy} if shared.active.load(Ordering::Relaxed)=>{
-                        mouse.0=(mouse.0+dx).clamp(0,shared.local_screen.w-1);
-                        mouse.1=(mouse.1+dy).clamp(0,shared.local_screen.h-1);
-                        simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
+                        if dx==0 && dy==0{continue;}
+                        first_motion_seen=true;
+                        entered_at=None;
+                        mouse.0=(mouse.0.saturating_add(dx)).clamp(0,shared.local_screen.w-1);
+                        mouse.1=(mouse.1.saturating_add(dy)).clamp(0,shared.local_screen.h-1);
+                        if let Err(e)=native_cursor::move_to(mouse.0,mouse.1){
+                            shared.active.store(false,Ordering::SeqCst);
+                            shared.info(UiStatus::InputHookFailed(e));
+                            shared.send(Wire::Back);
+                            continue;
+                        }
+                        if cfg!(target_os="macos"){
+                            simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
+                        }
+                        // Safe edge-return: derived from the *network cursor
+                        // model*, never the injected event observer. Require
+                        // moving inward first so entry at x=3 cannot return.
+                        let layout=*shared.layout.lock().unwrap();
+                        if !armed_return && layout.inward(mouse.0,mouse.1,shared.local_screen){
+                            armed_return=true;
+                        }else if armed_return && layout.returning(mouse.0,mouse.1,shared.local_screen){
+                            shared.active.store(false,Ordering::SeqCst);
+                            shared.send(Wire::Back);
+                            shared.info(UiStatus::Returned);
+                            for k in pressed.drain(){simulate(EventType::KeyRelease(k));}
+                            for b in buttons.drain(){simulate(EventType::ButtonRelease(b));}
+                        }
                     }
                     Wire::Input(evt) if shared.active.load(Ordering::Relaxed)=>{
                         match evt {
@@ -289,9 +351,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     Wire::PasteRemote(text) if shared.active.load(Ordering::Relaxed)=>{
                         if clipboard_set(&text){paste_hotkey(Platform::local());}
                     }
-                    Wire::ClipboardRequest=>{
-                        shared.send(Wire::ClipboardReply(clipboard_get()));
-                    }
+                    Wire::ClipboardRequest=>shared.send(Wire::ClipboardReply(clipboard_get())),
                     _=>{}
                 }
             }
@@ -397,6 +457,15 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
             if motion_shared.active.load(Ordering::Relaxed){
                 motion_shared.flush_motion();
             }
+            if motion_shared.pending_enter.load(Ordering::Relaxed){
+                let timeout=motion_shared.pending_enter_since.lock().unwrap()
+                    .is_some_and(|t|t.elapsed()>Duration::from_secs(2));
+                if timeout && motion_shared.pending_enter.swap(false,Ordering::SeqCst){
+                    *motion_shared.pending_enter_since.lock().unwrap()=None;
+                    motion_shared.info(UiStatus::MouseEntryTimedOut);
+                    motion_shared.send(Wire::Back);
+                }
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
     });
@@ -404,7 +473,23 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     for msg in rx {
         if shared.stop_requested.load(Ordering::SeqCst){break;}
         match msg {
+            Wire::EnterAck{accepted}=>{
+                if shared.pending_enter.swap(false,Ordering::SeqCst){
+                    *shared.pending_enter_since.lock().unwrap()=None;
+                    if accepted {
+                        shared.active.store(true,Ordering::SeqCst);
+                        shared.info(UiStatus::Ready);
+                    } else {
+                        shared.info(UiStatus::MouseEntryRejected);
+                    }
+                } else if accepted {
+                    // Late acknowledgement after timeout / F12: release peer.
+                    shared.send(Wire::Back);
+                }
+            }
             Wire::Back=>{
+                shared.pending_enter.store(false,Ordering::SeqCst);
+                *shared.pending_enter_since.lock().unwrap()=None;
                 shared.active.store(false,Ordering::SeqCst);
                 shared.return_cursor();
                 shared.info(UiStatus::Returned);
@@ -442,9 +527,10 @@ fn capture(shared:Arc<Shared>) {
         match et {
             EventType::KeyPress(k)=>{
                 p.lock().unwrap().insert(k);
-                if k==Key::F12 && remote {
+                if k==Key::F12 && (remote || hook_shared.pending_enter.swap(false,Ordering::SeqCst)) {
                     skip_emergency.store(true,Ordering::SeqCst);
                     hook_shared.active.store(false,Ordering::SeqCst);
+                    *hook_shared.pending_enter_since.lock().unwrap()=None;
                     hook_shared.send(Wire::Back);
                     hook_shared.return_cursor();
                     return None;
@@ -486,12 +572,15 @@ fn capture(shared:Arc<Shared>) {
                 let (x,y)=(x as i32,y as i32);
                 let layout=*hook_shared.layout.lock().unwrap();
                 let other=*hook_shared.remote_screen.lock().unwrap();
-                if layout.entering(x,y,hook_shared.local_screen,other) {
+                if !hook_shared.pending_enter.load(Ordering::Relaxed)
+                    && layout.entering(x,y,hook_shared.local_screen,other) {
                     let (rx,ry)=layout.entry(x,y,hook_shared.local_screen,other);
                     *hook_shared.entry_local.lock().unwrap()=(x,y);
-                    hook_shared.active.store(true,Ordering::SeqCst);
+                    hook_shared.pending_enter.store(true,Ordering::SeqCst);
+                    *hook_shared.pending_enter_since.lock().unwrap()=Some(std::time::Instant::now());
                     hook_shared.send(Wire::Enter{x:rx,y:ry,side:layout.side});
-                    return None;
+                    // Do not suppress local cursor until receiver confirms.
+                    return Some(event);
                 }
                 return Some(event);
             }
