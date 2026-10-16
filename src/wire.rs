@@ -13,6 +13,8 @@ const NOISE: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 pub enum Wire {
     Hello { os: Platform, screen:Screen },
     Enter { x:i32,y:i32, side:Side },
+    /// Receiver confirms that physical cursor placement succeeded.
+    EnterAck { accepted:bool },
     Back,
     Input(EventType),
     MoveBy { dx:i32, dy:i32 },

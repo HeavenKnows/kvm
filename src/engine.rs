@@ -1,4 +1,4 @@
-use crate::{input,native_motion, model::{Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
+use crate::{input,native_cursor,native_motion, model::{Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
 use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::{Duration,SystemTime,UNIX_EPOCH}};
 const MAX_TEXT:usize=32*1024;
@@ -26,6 +26,9 @@ pub struct Shared {
     pub remote_screen:Mutex<Screen>,
     pub target:Mutex<Platform>,
     pub active:AtomicBool,
+    pending_enter:AtomicBool,
+    pending_enter_since:Mutex<Option<std::time::Instant>>,
+    pub native_motion_packets:std::sync::atomic::AtomicU64,
     pub ready:AtomicBool,
     pub started:AtomicBool,
     stop_requested:AtomicBool,
@@ -43,15 +46,17 @@ pub struct Shared {
 }
 impl Shared {
     pub fn new(s:&Settings)->Arc<Self>{
-        let (w,h)=rdev::display_size().unwrap_or((1920,1080));
+        let (w,h)=native_cursor::screen_size();
         Arc::new(Self {
             is_receiver:AtomicBool::new(s.role_server),
             status:Mutex::new(UiStatus::Idle),
             history:Mutex::new(VecDeque::with_capacity(32)),fatal_error:Mutex::new(None),
             layout:Mutex::new(s.layout),
-            local_screen:Screen::new(w as i32,h as i32),
+            local_screen:Screen::new(w,h),
             remote_screen:Mutex::new(Screen::new(1920,1080)),
             target:Mutex::new(Platform::Mac),active:AtomicBool::new(false),
+            pending_enter:AtomicBool::new(false),pending_enter_since:Mutex::new(None),
+            native_motion_packets:std::sync::atomic::AtomicU64::new(0),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
             stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
@@ -59,7 +64,7 @@ impl Shared {
             clipboard:AtomicBool::new(s.clipboard),remap:AtomicBool::new(s.remap),
             owner:Mutex::new(Owner::Local),
             pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
-            entry_local:Mutex::new((w as i32/2,h as i32/2)),out:Mutex::new(None),
+            entry_local:Mutex::new((w/2,h/2)),out:Mutex::new(None),
         })
     }
     pub fn info(&self,status:UiStatus){
@@ -86,6 +91,7 @@ impl Shared {
     pub fn add_native_motion(&self,dx:i32,dy:i32) {
         if !self.ready.load(Ordering::Relaxed) ||
            !self.active.load(Ordering::Relaxed) { return; }
+        self.native_motion_packets.fetch_add(1,Ordering::Relaxed);
         self.pending_dx.fetch_add(dx.clamp(-2000,2000),Ordering::Relaxed);
         self.pending_dy.fetch_add(dy.clamp(-2000,2000),Ordering::Relaxed);
     }
@@ -100,6 +106,8 @@ impl Shared {
     }
     fn shutdown_peer(&self) {
         self.active.store(false,Ordering::SeqCst);
+        self.pending_enter.store(false,Ordering::SeqCst);
+        *self.pending_enter_since.lock().unwrap()=None;
         self.ready.store(false,Ordering::SeqCst);
         if let Some(sock)=self.socket.lock().unwrap().take(){
             let _=sock.shutdown(std::net::Shutdown::Both);
@@ -107,6 +115,7 @@ impl Shared {
     }
     /// User-initiated disconnect; receiver keeps listening for the next client.
     pub fn disconnect_peer(&self){
+        self.pending_enter.store(false,Ordering::SeqCst);
         let was_remote=self.active.swap(false,Ordering::SeqCst);
         if was_remote && !self.is_receiver.load(Ordering::SeqCst) { self.return_cursor(); }
         self.shutdown_peer();

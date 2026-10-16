@@ -30,6 +30,9 @@ pub enum UiStatus {
     Stopped,
     PeerDisconnected(String),
     TransportClosed(String),
+    MouseEntryRejected,
+    MouseEntryTimedOut,
+    MouseNoMovement,
 }
 impl UiStatus {
     pub fn text(&self, language: Language) -> String {
@@ -66,6 +69,9 @@ impl UiStatus {
             Stopped => (if zh {"已停止接收，可重新启动"} else {"Receiver stopped; you can start it again"}).into(),
             PeerDisconnected(detail) => format!("{}: {detail}",if zh {"上一个连接已结束"}else{"Previous peer disconnected"}),
             TransportClosed(detail) => format!("{}: {detail}",if zh {"加密连接中断"}else{"Encrypted session closed"}),
+            MouseEntryRejected => (if zh {"远端光标定位失败，仍可在本机操作"}else{"Remote cursor placement failed; stayed local"}).into(),
+            MouseEntryTimedOut => (if zh {"远端未确认鼠标进入，仍可在本机操作"}else{"Remote entry was not acknowledged; stayed local"}).into(),
+            MouseNoMovement => (if zh {"远端未收到鼠标位移，已自动返回本机"}else{"No remote movement received; returned automatically"}).into(),
             InputHookFailed(e) => format!("{}: {e}", if zh {"输入捕获启动失败"} else {"Input capture failed"}),
             ClipboardRemoteEmpty => (if zh {"远端剪贴板没有可用纯文本"} else {"No plain text available in remote clipboard"}).into(),
         }
