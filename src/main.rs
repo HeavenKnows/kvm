@@ -443,9 +443,9 @@ impl KvmApp {
                 ui.horizontal_wrapped(|ui|{
                     let old=self.settings.role_server;
                     ui.radio_value(&mut self.settings.role_server,true,
-                        tr(lang,"接收端 · Mac","Receiver · Mac"));
+                        tr(lang,"接收模式","Receiver mode"));
                     ui.radio_value(&mut self.settings.role_server,false,
-                        tr(lang,"控制端 · Windows","Controller · Windows"));
+                        tr(lang,"控制模式","Controller mode"));
                     if old!=self.settings.role_server{self.persist_settings();}
                 });
             });
@@ -867,7 +867,9 @@ impl eframe::App for KvmApp {
 fn main() -> eframe::Result<()> {
     launch_mark("main-enter");
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 730.0])
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([960.0, 720.0])
+            .with_min_inner_size([720.0, 520.0])
             // Mac is a Dock-less menu-bar app, but Settings starts visible.
             .with_visible(true),
         ..Default::default()
@@ -918,5 +920,36 @@ mod ui_deadlock_tests {
         });
         assert!(rx.recv_timeout(Duration::from_secs(8)).is_ok(),
             "multi-monitor layout hung while rendering its first full frame");
+    }
+}
+
+/// Navigation regressions: every page must paint without hanging on locks.
+#[cfg(test)]
+mod page_navigation_tests {
+    use super::*;
+    #[test]
+    fn all_pages_render_in_egui(){
+        let (tx,rx)=mpsc::channel();
+        std::thread::spawn(move||{
+            let mut app=KvmApp::new(Settings::default());
+            let ctx=egui::Context::default();
+            for page in [
+                UiPage::Overview,UiPage::Displays,UiPage::Preferences,UiPage::Diagnostics
+            ]{
+                let _=ctx.run(egui::RawInput::default(),|ctx|{
+                    egui::CentralPanel::default().show(ctx,|ui|{
+                        match page {
+                            UiPage::Overview=>app.ui_overview(ui,Language::En),
+                            UiPage::Displays=>app.ui_displays(ui,Language::En),
+                            UiPage::Preferences=>app.ui_preferences(ui,Language::En),
+                            UiPage::Diagnostics=>app.ui_diagnostics(ui,Language::En),
+                        }
+                    });
+                });
+            }
+            let _=tx.send(());
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(8)).is_ok(),
+            "one of the four UI pages did not finish rendering");
     }
 }
