@@ -6,6 +6,7 @@ mod input;
 mod engine;
 mod status;
 mod network;
+mod cursor;
 #[cfg(target_os="macos")]
 mod macos_tray;
 
@@ -309,6 +310,22 @@ impl eframe::App for KvmApp {
                 } else {
                     engine::start_client(self.state.clone(),self.settings.clone());
                 }
+            }
+            if started {
+                let connected=self.state.ready.load(Ordering::SeqCst);
+                ui.horizontal(|ui|{
+                    if self.settings.role_server {
+                        if ui.add_enabled(connected,egui::Button::new(
+                            tr(lang,"断开当前控制端","Disconnect current controller"))).clicked(){
+                            self.state.disconnect_peer();
+                        }
+                        if ui.button(tr(lang,"停止接收","Stop receiver")).clicked(){
+                            self.state.stop();
+                        }
+                    } else if ui.button(tr(lang,"断开连接 / 取消连接","Disconnect / cancel connection")).clicked(){
+                        self.state.stop();
+                    }
+                });
             }
             if started && !self.state.ready.load(Ordering::Relaxed) && !self.settings.role_server {
                 ui.small(tr(lang,
