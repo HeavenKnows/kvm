@@ -1,5 +1,5 @@
 //! Noise-PSK-protected framed protocol. One frame <= 60 KiB, no custom cryptography.
-use crate::model::{Platform, Screen, Side};
+use crate::model::{Display, Platform, Screen, Side};
 use rdev::EventType;
 use serde::{Serialize, Deserialize};
 use sha2::{Digest, Sha256};
@@ -11,8 +11,8 @@ const NOISE: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Wire {
-    Hello { os: Platform, screen:Screen },
-    Enter { x:i32,y:i32, side:Side },
+    Hello { os: Platform, screen:Screen, displays:Vec<Display> },
+    Enter { x:i32,y:i32, side:Side, remote_display:usize },
     /// Receiver confirms that physical cursor placement succeeded.
     EnterAck { accepted:bool },
     Back,
@@ -177,7 +177,7 @@ mod tests {
             // macOS EAGAIN, regardless of whether this OS inherits the flag.
             socket.set_nonblocking(true).unwrap();
             let (tx,rx,_socket,reason)=connect(socket,"0123456789abcdef0123456789abcdef",false).unwrap();
-            tx.send(Wire::Hello{os:Platform::Mac,screen:Screen::new(1440,900)}).unwrap();
+            tx.send(Wire::Hello{os:Platform::Mac,screen:Screen::new(1440,900),displays:vec![Display{x:0,y:0,w:1440,h:900}]}).unwrap();
             tx.send(Wire::EnterAck{accepted:true}).unwrap();
             match rx.recv_timeout(Duration::from_secs(3)).unwrap(){
                 Wire::MoveBy{dx:7,dy:-4}=>{},
@@ -188,7 +188,8 @@ mod tests {
         let socket=TcpStream::connect(addr).unwrap();
         let (tx,rx,_socket,reason)=connect(socket,"0123456789abcdef0123456789abcdef",true).unwrap();
         match rx.recv_timeout(Duration::from_secs(3)).unwrap(){
-            Wire::Hello{os:Platform::Mac,screen}=>{
+            Wire::Hello{os:Platform::Mac,screen,displays}=>{
+                assert_eq!(displays.len(),1);
                 assert_eq!(screen.w,1440);
                 assert_eq!(screen.h,900);
             }
