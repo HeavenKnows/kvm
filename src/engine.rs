@@ -1,0 +1,347 @@
+use crate::{input, model::{Layout,Platform,Screen,Settings}, wire::{self,Wire}};
+use rdev::{self,EventType,Key};
+use std::{collections::HashSet,net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::Duration};
+const MAX_TEXT:usize=32*1024;
+
+#[derive(Clone,Copy,PartialEq,Eq,Debug)]
+enum Owner { Local, Remote }
+#[derive(Debug,PartialEq,Eq)]
+enum PasteAction { Native, SendLocalClipboard, RequestRemoteClipboard }
+fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
+    if !enabled {return PasteAction::Native;}
+    match (remote,owner){
+        (true,Owner::Local)=>PasteAction::SendLocalClipboard,
+        (false,Owner::Remote)=>PasteAction::RequestRemoteClipboard,
+        _=>PasteAction::Native,
+    }
+}
+
+pub struct Shared {
+    pub status:Mutex<String>,
+    pub layout:Mutex<Layout>,
+    pub local_screen:Screen,
+    pub remote_screen:Mutex<Screen>,
+    pub target:Mutex<Platform>,
+    pub active:AtomicBool,
+    pub ready:AtomicBool,
+    pub started:AtomicBool,
+    pub clipboard:AtomicBool,
+    pub remap:AtomicBool,
+    owner:Mutex<Owner>,
+    pending_dx:AtomicI32,
+    pending_dy:AtomicI32,
+    entry_local:Mutex<(i32,i32)>,
+    out:Mutex<Option<SyncSender<Wire>>>,
+}
+impl Shared {
+    pub fn new(s:&Settings)->Arc<Self>{
+        let (w,h)=rdev::display_size().unwrap_or((1920,1080));
+        Arc::new(Self {
+            status:Mutex::new("未连接".into()), layout:Mutex::new(s.layout),
+            local_screen:Screen::new(w as i32,h as i32),
+            remote_screen:Mutex::new(Screen::new(1920,1080)),
+            target:Mutex::new(Platform::Mac),active:AtomicBool::new(false),
+            ready:AtomicBool::new(false),started:AtomicBool::new(false),
+            clipboard:AtomicBool::new(s.clipboard),remap:AtomicBool::new(s.remap),
+            owner:Mutex::new(Owner::Local),
+            pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
+            entry_local:Mutex::new((w as i32/2,h as i32/2)),out:Mutex::new(None),
+        })
+    }
+    pub fn info(&self,s:&str){*self.status.lock().unwrap()=s.into();}
+    fn flush_motion(&self){
+        let dx=self.pending_dx.swap(0,Ordering::Relaxed);
+        let dy=self.pending_dy.swap(0,Ordering::Relaxed);
+        if dx==0 && dy==0 {return;}
+        if let Some(tx)=self.out.lock().unwrap().as_ref(){
+            if tx.try_send(Wire::MoveBy{dx,dy}).is_err(){
+                self.active.store(false,Ordering::SeqCst);
+                self.info("鼠标队列拥塞，已停止跨机控制");
+            }
+        }
+    }
+    fn send(&self,msg:Wire){
+        // Preserve mouse->click / mouse->key order; coalesce motion between 2ms ticks.
+        self.flush_motion();
+        if let Some(tx)=self.out.lock().unwrap().as_ref(){
+            if tx.try_send(msg).is_err(){
+                self.active.store(false,Ordering::SeqCst);
+                self.info("发送队列拥塞；已停止跨机控制，请重新连接");
+            }
+        }
+    }
+    fn return_cursor(&self){
+        let (mut x,mut y)=*self.entry_local.lock().unwrap();
+        match self.layout.lock().unwrap().side {
+            crate::model::Side::Right=>x=self.local_screen.w-75,
+            crate::model::Side::Left=>x=75,
+            crate::model::Side::Top=>y=75,
+            crate::model::Side::Bottom=>y=self.local_screen.h-75,
+        }
+        simulate(EventType::MouseMove{x:x as f64,y:y as f64});
+    }
+    fn close(&self){
+        self.active.store(false,Ordering::SeqCst);
+        self.ready.store(false,Ordering::SeqCst);
+        self.out.lock().unwrap().take();
+    }
+}
+fn clipboard_get()->Option<String>{
+    let mut c=arboard::Clipboard::new().ok()?;
+    c.get_text().ok().filter(|s|s.len()<=MAX_TEXT)
+}
+fn clipboard_set(s:&str)->bool {
+    if s.len()>MAX_TEXT {return false;}
+    arboard::Clipboard::new().and_then(|mut c|c.set_text(s.to_owned())).is_ok()
+}
+fn simulate(event:EventType){let _=rdev::simulate(&event);}
+fn paste_hotkey(os:Platform){
+    let primary=match os {Platform::Windows=>Key::ControlLeft,Platform::Mac=>Key::MetaLeft};
+    simulate(EventType::KeyPress(primary));
+    simulate(EventType::KeyPress(Key::KeyV));
+    simulate(EventType::KeyRelease(Key::KeyV));
+    simulate(EventType::KeyRelease(primary));
+}
+
+pub fn start_server(shared:Arc<Shared>, s:Settings){
+    if shared.started.swap(true,Ordering::SeqCst){return;}
+    std::thread::spawn(move ||{
+        let listener=match TcpListener::bind(("0.0.0.0",wire::PORT)) {
+            Ok(x)=>x,Err(e)=>{shared.info(&format!("监听失败: {e}"));return;}
+        };
+        shared.info("等待另一台电脑连接…");
+        let (stream,peer)=match listener.accept(){Ok(x)=>x,Err(e)=>{shared.info(&format!("连接失败: {e}"));return;}};
+        shared.info(&format!("正在验证 {peer}…"));
+        let (tx,rx)=match wire::connect(stream,&s.secret,false){
+            Ok(x)=>x,Err(e)=>{shared.info(&format!("配对失败: {e}"));return;}
+        };
+        *shared.out.lock().unwrap()=Some(tx.clone());
+        shared.ready.store(true,Ordering::SeqCst);
+        shared.info(&format!("已连接 {peer}"));
+        shared.send(Wire::Hello{os:Platform::local(),screen:shared.local_screen});
+        let watch=shared.clone();
+        let armed=Arc::new(AtomicBool::new(false));
+        let watch_armed=armed.clone();
+        // Listen (not grab) on receiver so its own keyboard remains locally usable.
+        std::thread::spawn(move ||{
+            if let Err(e)=rdev::listen(move |e| {
+                if !watch.active.load(Ordering::Relaxed){return;}
+                if let EventType::MouseMove{x,y}=e.event_type {
+                    let x=x as i32; let y=y as i32;
+                    let layout=*watch.layout.lock().unwrap();
+                    if !watch_armed.load(Ordering::Relaxed) {
+                        if layout.inward(x,y,watch.local_screen){watch_armed.store(true,Ordering::Relaxed);}
+                    } else if layout.returning(x,y,watch.local_screen) {
+                        watch.active.store(false,Ordering::SeqCst);
+                        watch.send(Wire::Back);
+                    }
+                }
+            }){ eprintln!("receiver mouse listener: {e:?}"); }
+        });
+        let mut mouse=(shared.local_screen.w/2,shared.local_screen.h/2);
+        let mut pressed=HashSet::<Key>::new();
+        let mut buttons=HashSet::<rdev::Button>::new();
+        for msg in rx {
+            match msg {
+                Wire::Enter{x,y,side}=>{
+                    let mut l=*shared.layout.lock().unwrap(); l.side=side;
+                    *shared.layout.lock().unwrap()=l;
+                    armed.store(false,Ordering::SeqCst);
+                    shared.active.store(true,Ordering::SeqCst);
+                    mouse=(x.clamp(3,shared.local_screen.w-4),y.clamp(3,shared.local_screen.h-4));
+                    simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
+                }
+                Wire::Back=>{
+                    shared.active.store(false,Ordering::SeqCst);
+                    for k in pressed.drain(){simulate(EventType::KeyRelease(k));}
+                    for b in buttons.drain(){simulate(EventType::ButtonRelease(b));}
+                }
+                Wire::MoveBy{dx,dy} if shared.active.load(Ordering::Relaxed)=>{
+                    mouse.0=(mouse.0+dx).clamp(0,shared.local_screen.w-1);
+                    mouse.1=(mouse.1+dy).clamp(0,shared.local_screen.h-1);
+                    simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
+                }
+                Wire::Input(evt) if shared.active.load(Ordering::Relaxed)=>{
+                    match evt {
+                        EventType::KeyPress(k)=>{pressed.insert(k);},
+                        EventType::KeyRelease(k)=>{pressed.remove(&k);},
+                        EventType::ButtonPress(b)=>{buttons.insert(b);},
+                        EventType::ButtonRelease(b)=>{buttons.remove(&b);},
+                        _=>{}
+                    }
+                    simulate(evt);
+                }
+                Wire::PasteRemote(text) if shared.active.load(Ordering::Relaxed)=>{
+                    if clipboard_set(&text){paste_hotkey(Platform::local());}
+                }
+                Wire::ClipboardRequest=>{
+                    shared.send(Wire::ClipboardReply(clipboard_get()));
+                }
+                _=>{}
+            }
+        }
+        for k in pressed {simulate(EventType::KeyRelease(k));}
+        for b in buttons {simulate(EventType::ButtonRelease(b));}
+        shared.close(); shared.info("连接已断开；请重启程序重新连接");
+    });
+}
+
+pub fn start_client(shared:Arc<Shared>,s:Settings){
+    if shared.started.swap(true,Ordering::SeqCst){return;}
+    std::thread::spawn(move ||{
+        shared.info("正在连接…");
+        let stream=match TcpStream::connect_timeout(&match s.address.parse(){
+            Ok(a)=>a,Err(_)=>{shared.info("地址格式应为 IP:24881");return;}
+        },Duration::from_secs(4)){
+            Ok(s)=>s,Err(e)=>{shared.info(&format!("网络连接失败: {e}"));return;}
+        };
+        let (tx,rx)=match wire::connect(stream,&s.secret,true){
+            Ok(x)=>x,Err(e)=>{shared.info(&format!("配对失败: {e}"));return;}
+        };
+        *shared.out.lock().unwrap()=Some(tx);
+        shared.info("等待接收端信息…");
+        // Clipboard IO stays off the global input hook thread.
+        let (paste_tx,paste_rx)=mpsc::sync_channel::<()>(16);
+        let work_shared=shared.clone();
+        std::thread::spawn(move ||{
+            while paste_rx.recv().is_ok(){
+                if let Some(text)=clipboard_get(){work_shared.send(Wire::PasteRemote(text));}
+                else {work_shared.info("本机剪贴板不是文本或超出 32 KiB，已取消远程粘贴");}
+            }
+        });
+        let input_shared=shared.clone();
+        std::thread::spawn(move || capture(input_shared,paste_tx));
+        let motion_shared=shared.clone();
+        std::thread::spawn(move || {
+            while motion_shared.out.lock().unwrap().is_some(){
+                if motion_shared.active.load(Ordering::Relaxed){motion_shared.flush_motion();}
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        for msg in rx {
+            match msg {
+                Wire::Hello{os,screen}=>{
+                    *shared.target.lock().unwrap()=os;
+                    *shared.remote_screen.lock().unwrap()=screen;
+                    shared.ready.store(true,Ordering::SeqCst);
+                    shared.info("已连接；将鼠标推到设置的屏幕边缘即可跨屏（F12 返回）");
+                }
+                Wire::Back=>{
+                    shared.active.store(false,Ordering::SeqCst);
+                    shared.return_cursor();
+                    shared.info("已返回本机");
+                }
+                Wire::ClipboardReply(Some(text))=>{
+                    // The physical Ctrl/Cmd key may already have been released by now.
+                    // Inject a COMPLETE local shortcut after updating the clipboard.
+                    if clipboard_set(&text){
+                        *shared.owner.lock().unwrap()=Owner::Local;
+                        paste_hotkey(Platform::local());
+                    }else{shared.info("收到的剪贴板文本无效或超限");}
+                }
+                Wire::ClipboardReply(None)=>shared.info("远端剪贴板没有可用纯文本"),
+                _=>{}
+            }
+        }
+        shared.close(); shared.info("连接断开，本机输入已恢复；请重启应用后重连");
+    });
+}
+
+fn capture(shared:Arc<Shared>, paste_tx:SyncSender<()>) {
+    let pressed=Arc::new(Mutex::new(HashSet::<Key>::new()));
+    let skip_v=Arc::new(AtomicBool::new(false));
+    let skip_f12=Arc::new(AtomicBool::new(false));
+    let pos=Arc::new(Mutex::new(None::<(i32,i32)>));
+    let p=pressed.clone(); let skip=skip_v.clone(); let skip_emergency=skip_f12.clone(); let last=pos.clone();
+    let me=Platform::local();
+    if let Err(e)=rdev::grab(move |event| {
+        if !shared.ready.load(Ordering::Relaxed){return Some(event);}
+        let et=event.event_type.clone();
+        let remote=shared.active.load(Ordering::Relaxed);
+        match et {
+            EventType::KeyPress(k)=>{
+                p.lock().unwrap().insert(k);
+                if k==Key::F12 && remote {
+                    skip_emergency.store(true,Ordering::SeqCst);
+                    shared.active.store(false,Ordering::SeqCst);
+                    shared.send(Wire::Back);
+                    shared.return_cursor();
+                    return None;
+                }
+                let chord=p.lock().unwrap().iter().any(|&v|input::primary(v,me));
+                if chord && (k==Key::KeyC || k==Key::KeyX){
+                    *shared.owner.lock().unwrap()=if remote {Owner::Remote} else {Owner::Local};
+                }
+                if k==Key::KeyV && chord {
+                    let owner=*shared.owner.lock().unwrap();
+                    let action=paste_action(remote,owner,shared.clipboard.load(Ordering::Relaxed));
+                    match action {
+                        PasteAction::SendLocalClipboard=>{
+                            skip.store(true,Ordering::SeqCst);
+                            let _=paste_tx.try_send(());
+                            return None;
+                        }
+                        PasteAction::RequestRemoteClipboard=>{
+                            skip.store(true,Ordering::SeqCst);
+                            shared.send(Wire::ClipboardRequest);
+                            return None;
+                        }
+                        PasteAction::Native=>{}
+                    }
+                }
+            }
+            EventType::KeyRelease(k)=>{
+                p.lock().unwrap().remove(&k);
+                if k==Key::KeyV && skip.swap(false,Ordering::SeqCst){return None;}
+                if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
+            }
+            EventType::MouseMove{x,y}=>{
+                let x=x as i32;let y=y as i32;
+                let mut previous=last.lock().unwrap();
+                let delta=previous.map(|(px,py)|(x-px,y-py)).unwrap_or((0,0));
+                *previous=Some((x,y));
+                if remote {
+                    if delta!=(0,0) {
+                        shared.pending_dx.fetch_add(delta.0.clamp(-200,200),Ordering::Relaxed);
+                        shared.pending_dy.fetch_add(delta.1.clamp(-200,200),Ordering::Relaxed);
+                    }
+                    return None;
+                }
+                let layout=*shared.layout.lock().unwrap();
+                let other=*shared.remote_screen.lock().unwrap();
+                if layout.entering(x,y,shared.local_screen,other){
+                    let (rx,ry)=layout.entry(x,y,shared.local_screen,other);
+                    *shared.entry_local.lock().unwrap()=(x,y);
+                    shared.active.store(true,Ordering::SeqCst);
+                    shared.send(Wire::Enter{x:rx,y:ry,side:layout.side});
+                    return None;
+                }
+                return Some(event);
+            }
+            _=>{}
+        }
+        if remote {
+            let target=*shared.target.lock().unwrap();
+            let mapped=match et {
+                EventType::KeyPress(k)=>EventType::KeyPress(input::remap(k,me,target,shared.remap.load(Ordering::Relaxed))),
+                EventType::KeyRelease(k)=>EventType::KeyRelease(input::remap(k,me,target,shared.remap.load(Ordering::Relaxed))),
+                x=>x,
+            };
+            shared.send(Wire::Input(mapped));
+            None
+        }else{Some(event)}
+    }){ shared_for_error(&e); }
+}
+fn shared_for_error(e:&rdev::GrabError){eprintln!("input hook stopped: {e:?}");}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test] fn paste_on_demand_routing(){
+        assert_eq!(paste_action(true,Owner::Local,true),PasteAction::SendLocalClipboard);
+        assert_eq!(paste_action(false,Owner::Remote,true),PasteAction::RequestRemoteClipboard);
+        assert_eq!(paste_action(false,Owner::Local,true),PasteAction::Native);
+        assert_eq!(paste_action(true,Owner::Remote,true),PasteAction::Native);
+        assert_eq!(paste_action(true,Owner::Local,false),PasteAction::Native);
+    }
+}
