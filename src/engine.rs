@@ -150,51 +150,57 @@ fn paste_hotkey(os:Platform){
 // handled at a time, preserving the existing single-controller design.
 pub fn start_server(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
+    shared.stop_requested.store(false,Ordering::SeqCst);
     std::thread::spawn(move || {
-        let listener=match TcpListener::bind(("0.0.0.0",s.listen_port)){
-            Ok(x)=>x,
+        let listener=match TcpListener::bind(("0.0.0.0",s.listen_port)) {
+            Ok(v)=>v,
             Err(e)=>{
                 shared.info(UiStatus::BindFailed(e.to_string()));
                 shared.started.store(false,Ordering::SeqCst);
                 return;
             }
         };
-        let watch=shared.clone();
-        let armed=Arc::new(AtomicBool::new(false));
-        let watch_armed=armed.clone();
-        std::thread::spawn(move ||{
-            if let Err(e)=rdev::listen(move |e| {
-                if !watch.active.load(Ordering::Relaxed){return;}
-                if let EventType::MouseMove{x,y}=e.event_type {
-                    let (x,y)=(x as i32,y as i32);
-                    let layout=*watch.layout.lock().unwrap();
-                    if !watch_armed.load(Ordering::Relaxed){
-                        if layout.inward(x,y,watch.local_screen){watch_armed.store(true,Ordering::Relaxed);}
-                    } else if layout.returning(x,y,watch.local_screen){
-                        watch.active.store(false,Ordering::SeqCst);
-                        watch.send(Wire::Back);
-                    }
+        if let Err(e)=listener.set_nonblocking(true){
+            shared.info(UiStatus::BindFailed(e.to_string()));
+            shared.started.store(false,Ordering::SeqCst);
+            return;
+        }
+        // Do NOT use a receiver-side global mouse listener to detect return
+        // edges: injected mouse events are seen by the listener as well,
+        // producing erroneous "Back" messages and snap-back at x=0.
+        // Return via controller F12 or explicit Disconnect instead.
+        shared.info(UiStatus::Waiting);
+        while !shared.stop_requested.load(Ordering::SeqCst) {
+            let (stream,peer)=match listener.accept(){
+                Ok(v)=>v,
+                Err(e) if e.kind()==std::io::ErrorKind::WouldBlock=>{
+                    std::thread::sleep(Duration::from_millis(60));
+                    continue;
                 }
-            }) { eprintln!("receiver listener stopped: {e:?}"); }
-        });
-        loop {
-            shared.info(UiStatus::Waiting);
-            let (stream,peer)=match listener.accept() {
-                Ok(x)=>x,
                 Err(e)=>{
                     shared.info(UiStatus::AcceptFailed(e.to_string()));
-                    shared.started.store(false,Ordering::SeqCst);
-                    return;
+                    break;
                 }
             };
+            if shared.stop_requested.load(Ordering::SeqCst){break;}
+            if let Err(e)=shared.store_socket(&stream){
+                shared.info(UiStatus::AcceptFailed(e.to_string()));
+                continue;
+            }
             shared.info(UiStatus::Authenticating(peer.to_string()));
-            let (tx,rx)=match wire::connect(stream,&s.secret,false){
-                Ok(x)=>x,
+            let (tx,rx,_control)=match wire::connect(stream,&s.secret,false){
+                Ok(v)=>v,
                 Err(e)=>{
+                    shared.shutdown_peer();
+                    if shared.stop_requested.load(Ordering::SeqCst){break;}
                     shared.info(UiStatus::PairingFailed(e.to_string()));
                     continue;
                 }
             };
+            if shared.stop_requested.load(Ordering::SeqCst){
+                shared.shutdown_peer();
+                break;
+            }
             *shared.out.lock().unwrap()=Some(tx);
             shared.ready.store(true,Ordering::SeqCst);
             shared.info(UiStatus::ConnectedPeer(peer.to_string()));
@@ -203,13 +209,14 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
             let mut pressed=HashSet::<Key>::new();
             let mut buttons=HashSet::<rdev::Button>::new();
             for msg in rx {
+                if shared.stop_requested.load(Ordering::SeqCst){break;}
                 match msg {
                     Wire::Enter{x,y,side}=>{
-                        let mut l=*shared.layout.lock().unwrap();l.side=side;
+                        let mut l=*shared.layout.lock().unwrap(); l.side=side;
                         *shared.layout.lock().unwrap()=l;
-                        armed.store(false,Ordering::SeqCst);
                         shared.active.store(true,Ordering::SeqCst);
-                        mouse=(x.clamp(3,shared.local_screen.w-4),y.clamp(3,shared.local_screen.h-4));
+                        mouse=(x.clamp(3,shared.local_screen.w-4),
+                               y.clamp(3,shared.local_screen.h-4));
                         simulate(EventType::MouseMove{x:mouse.0 as f64,y:mouse.1 as f64});
                     }
                     Wire::Back=>{
@@ -241,12 +248,16 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     _=>{}
                 }
             }
-            // Always release held remote inputs before accepting another peer.
             for k in pressed {simulate(EventType::KeyRelease(k));}
             for b in buttons {simulate(EventType::ButtonRelease(b));}
             shared.close();
-            // Keep the listener bound; a new controller can retry immediately.
+            if !shared.stop_requested.load(Ordering::SeqCst) {
+                shared.info(UiStatus::Waiting);
+            }
         }
+        shared.close();
+        shared.started.store(false,Ordering::SeqCst);
+        shared.info(UiStatus::Stopped);
     });
 }
 
