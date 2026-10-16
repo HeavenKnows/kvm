@@ -220,3 +220,12 @@ macOS 注入鼠标点击前会检查 `AXIsProcessTrusted()`，若尚未授权会
 - 启动日志位于 macOS 的临时目录，通常可在终端使用 `cat /tmp/kvm-launch.log` 查看；包含 `main-enter`、`app-creator-enter`、`first-ui-frame`、`display-query-start/done`、`tray-create-start/done` 等阶段，不包含配对密钥或键盘输入。
 - **说明**：真实屏幕查询如果长期卡住，应用会在约 2 秒后仍允许窗口运行及接收服务使用临时单屏几何。此时需停止接收、重新连接或重启以更新真实多屏信息；不要在接收已开始的会话中更改屏幕拓扑。
 - 构建成功并不等于已在真实外接显示器的 MacBook 上通过验收。安装前应彻底退出旧版 kvm 进程。
+
+## 0.5.0-beta.5 Mac 启动第一帧卡住修复
+
+收到的实机日志显示 `first-ui-frame` 后再无第二帧，而 `display-query-done` 已完成，因此不能把故障继续归咎于显示器查询本身，菜单栏图标也尚未开始创建。
+
+- macOS 不再在后台线程执行 `egui::Context::set_fonts`；这个操作会和首帧 GUI 字体排版竞争。**本版暂时禁用 macOS 自定义中文系统字体覆盖**以验证启动稳定性，界面中文字形显示可能受影响，待启动故障确认后采用安全方式恢复；Windows 字体保持原样。
+- macOS GUI 第一帧只绘制简化启动界面，主动请求下一帧；第二帧才创建顶部菜单栏图标，第三帧再应用异步获得的多显示器拓扑，第四帧才绘制完整设置界面。每个阶段在启动日志中留有标记。
+- 启动日志写入 `$TMPDIR/kvm-launch.log`，新增 `minimal-first-frame-enter/return`、`tray-create-start/done`、`display-topology-apply-start/done`、`full-ui-start/returned`，可诊断是否是字体、多显示器或者完整 UI 卡住。
+- 顶部菜单栏常驻、`LSUIElement=true`（不显示 Dock）仍保留。只打包 Windows x64 和 macOS Apple Silicon。**CI 不具备真实 MacBook 外接屏幕 GUI 的验收能力**。
