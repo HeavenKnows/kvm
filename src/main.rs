@@ -140,6 +140,31 @@ fn install_chinese_font(ctx: &egui::Context) {
     }
 }
 
+#[derive(Clone,Copy,PartialEq,Eq,Debug)]
+enum UiPage {Overview,Displays,Preferences,Diagnostics}
+impl UiPage {
+    fn label(self,lang:Language)->&'static str{
+        match self {
+            Self::Overview=>tr(lang,"概览","Overview"),
+            Self::Displays=>tr(lang,"屏幕布局","Displays"),
+            Self::Preferences=>tr(lang,"偏好设置","Preferences"),
+            Self::Diagnostics=>tr(lang,"运行诊断","Diagnostics"),
+        }
+    }
+}
+fn section_card<R>(ui:&mut egui::Ui,title:&str,render:impl FnOnce(&mut egui::Ui)->R)->R{
+    egui::Frame::group(ui.style())
+        .fill(ui.visuals().faint_bg_color)
+        .corner_radius(egui::CornerRadius::same(12))
+        .inner_margin(egui::Margin::same(16))
+        .show(ui,|ui|{
+            ui.set_width(ui.available_width());
+            ui.heading(title);
+            ui.add_space(9.0);
+            render(ui)
+        }).inner
+}
+
 struct KvmApp {
     settings: Settings,
     state: Arc<engine::Shared>,
@@ -157,6 +182,7 @@ struct KvmApp {
     #[cfg(target_os="macos")]
     tray_attempted:bool,
     frames:u32,
+    page:UiPage,
     #[cfg(target_os="macos")]
     font_rx:Option<Receiver<Option<(&'static str,Vec<u8>)>>>,
     #[cfg(target_os="macos")]
@@ -209,6 +235,7 @@ impl KvmApp {
             #[cfg(target_os="macos")]
             tray_attempted:false,
             frames:0,
+            page:UiPage::Overview,
             #[cfg(target_os="macos")]
             font_rx,
             #[cfg(target_os="macos")]
@@ -381,6 +408,278 @@ impl KvmApp {
             "After plugging/unplugging displays, restart both apps; reconnect to refresh remote topology."));
     }
 
+
+    fn ui_overview(&mut self,ui:&mut egui::Ui,lang:Language){
+        let started=self.state.started.load(Ordering::SeqCst);
+        let connected=self.state.ready.load(Ordering::SeqCst);
+        section_card(ui,tr(lang,"连接状态","Connection status"),|ui|{
+            let status=self.state.status.lock().unwrap().clone();
+            ui.horizontal_wrapped(|ui|{
+                let (indicator,colour)=if connected {
+                    (tr(lang,"● 已连接","● Connected"),egui::Color32::from_rgb(72,192,139))
+                }else if started{
+                    (tr(lang,"● 正在运行","● Running"),egui::Color32::from_rgb(236,182,78))
+                }else{
+                    (tr(lang,"● 未连接","● Disconnected"),ui.visuals().weak_text_color())
+                };
+                ui.colored_label(colour,egui::RichText::new(indicator).strong());
+                ui.separator();
+                ui.label(status.text(lang));
+            });
+            if self.state.active.load(Ordering::Relaxed){
+                ui.colored_label(egui::Color32::from_rgb(72,192,139),
+                    tr(lang,"正在控制另一台电脑 · F12 返回本机","Controlling remote computer · F12 to return"));
+            }
+            if started && !connected && !self.settings.role_server{
+                ui.small(tr(lang,
+                    "TCP 连接、配对和接收端响应均设置了超时。",
+                    "TCP, pairing and receiver responses have timeouts."));
+            }
+        });
+        ui.add_space(12.0);
+        section_card(ui,tr(lang,"设备与连接","Devices & connection"),|ui|{
+            ui.label(tr(lang,"本机角色","This computer's role"));
+            ui.add_enabled_ui(!started,|ui|{
+                ui.horizontal_wrapped(|ui|{
+                    let old=self.settings.role_server;
+                    ui.radio_value(&mut self.settings.role_server,true,
+                        tr(lang,"接收端 · Mac","Receiver · Mac"));
+                    ui.radio_value(&mut self.settings.role_server,false,
+                        tr(lang,"控制端 · Windows","Controller · Windows"));
+                    if old!=self.settings.role_server{self.persist_settings();}
+                });
+            });
+            ui.add_space(8.0);
+            if self.settings.role_server {
+                ui.horizontal_wrapped(|ui|{
+                    ui.label(format!("{}: {}",tr(lang,"监听端口","Listening port"),self.settings.listen_port));
+                    ui.separator();
+                    ui.label(tr(lang,"配对密钥","Pairing key"));
+                });
+                ui.horizontal_wrapped(|ui|{
+                    ui.monospace(&self.settings.secret);
+                    if ui.button(tr(lang,"复制密钥","Copy key")).clicked(){
+                        ui.ctx().copy_text(self.settings.secret.clone());
+                    }
+                });
+                self.receiver_addresses(ui,lang);
+                #[cfg(target_os="macos")]
+                if !native_cursor::accessibility_trusted(){
+                    ui.colored_label(egui::Color32::YELLOW,tr(lang,
+                        "未获得辅助功能权限；鼠标点击和键盘注入可能无法工作。",
+                        "Accessibility permission missing; remote clicks/keys may not work."));
+                }
+            }else{
+                ui.horizontal_wrapped(|ui|{
+                    ui.label(tr(lang,"接收端 IP:端口","Receiver IP:port"));
+                    if ui.text_edit_singleline(&mut self.settings.address).changed(){
+                        self.persist_settings();
+                    }
+                });
+                ui.horizontal_wrapped(|ui|{
+                    ui.label(tr(lang,"配对密钥","Pairing key"));
+                    if ui.add(egui::TextEdit::singleline(&mut self.settings.secret)
+                        .password(true).desired_width(260.0)).changed(){
+                        self.persist_settings();
+                    }
+                });
+            }
+            ui.add_space(9.0);
+            if ui.add_enabled(!started,egui::Button::new(
+                if self.settings.role_server {
+                    tr(lang,"启动接收端","Start receiver")
+                }else{tr(lang,"连接并开始共享","Connect & share")}
+            )).clicked(){
+                self.persist_settings();
+                if self.settings.role_server {
+                    engine::start_server(self.state.clone(),self.settings.clone());
+                }else{engine::start_client(self.state.clone(),self.settings.clone());}
+            }
+            if started{
+                ui.horizontal_wrapped(|ui|{
+                    if self.settings.role_server {
+                        if ui.add_enabled(connected,egui::Button::new(
+                            tr(lang,"断开当前控制端","Disconnect controller"))).clicked(){
+                            self.state.disconnect_peer();
+                        }
+                        if ui.button(tr(lang,"停止接收","Stop receiver")).clicked(){
+                            self.state.stop();
+                        }
+                    }else if ui.button(tr(lang,"断开连接","Disconnect")).clicked(){
+                        self.state.stop();
+                    }
+                });
+            }
+        });
+        ui.add_space(12.0);
+        section_card(ui,tr(lang,"快速说明","Getting started"),|ui|{
+            ui.label(if self.settings.role_server{
+                tr(lang,"保持接收端运行，在 Windows 控制端输入本机地址和配对密钥。",
+                    "Keep the receiver running; enter this computer's address and pairing key on Windows.")
+            }else{
+                tr(lang,"连接后在「屏幕布局」中调整显示器位置，将鼠标移到相应屏幕边缘切换。",
+                    "After connecting, arrange displays on the Displays page and move the pointer across the shared edge.")
+            });
+            ui.small(tr(lang,"仅限可信局域网 · 按 F12 可紧急返回",
+                "Trusted LAN only · F12 is the emergency return shortcut"));
+        });
+    }
+
+    fn ui_displays(&mut self,ui:&mut egui::Ui,lang:Language){
+        if self.settings.role_server {
+            section_card(ui,tr(lang,"本机显示器","Local monitors"),|ui|{
+                let displays=self.state.local_displays();
+                ui.label(format!("{}: {}",tr(lang,"检测到的显示器","Detected monitors"),displays.len()));
+                for (i,d) in displays.iter().enumerate(){
+                    ui.horizontal_wrapped(|ui|{
+                        ui.strong(format!("{} {}",tr(lang,"显示器","Monitor"),i+1));
+                        ui.label(format!("{} × {} · ({}, {})",d.w,d.h,d.x,d.y));
+                    });
+                }
+                ui.add_space(5.0);
+                ui.small(tr(lang,
+                    "请在 Windows 控制端拖动屏幕并自动吸附到对应边缘。",
+                    "Drag and snap the displays on the Windows controller."));
+            });
+        }else{
+            section_card(ui,tr(lang,"拖拽与自动吸附","Drag & snap"),|ui|{
+                self.layout_ui(ui,lang);
+            });
+        }
+    }
+
+    fn ui_preferences(&mut self,ui:&mut egui::Ui,lang:Language){
+        section_card(ui,tr(lang,"通用设置","General"),|ui|{
+            ui.horizontal_wrapped(|ui|{
+                ui.label("Language / 语言");
+                let name=if lang==Language::Zh{"中文"}else{"English"};
+                let old=self.settings.language;
+                egui::ComboBox::from_id_salt("language-preferences").selected_text(name)
+                    .show_ui(ui,|ui|{
+                        ui.selectable_value(&mut self.settings.language,Language::Zh,"中文");
+                        ui.selectable_value(&mut self.settings.language,Language::En,"English");
+                    });
+                if old!=self.settings.language{self.persist_settings();}
+            });
+            if ui.checkbox(&mut self.settings.remap,
+                tr(lang,"Windows Ctrl ↔ macOS Command 键位映射",
+                    "Map Windows Ctrl ↔ macOS Command")).changed(){
+                self.state.remap.store(self.settings.remap,Ordering::SeqCst);
+                self.persist_settings();
+            }
+            if ui.checkbox(&mut self.settings.clipboard,
+                tr(lang,"剪贴板按需同步（仅纯文本）",
+                    "Clipboard on demand (plain text only)")).changed(){
+                self.state.clipboard.store(self.settings.clipboard,Ordering::SeqCst);
+                self.persist_settings();
+            }
+        });
+        ui.add_space(12.0);
+        if self.settings.role_server{
+            section_card(ui,tr(lang,"接收端配置","Receiver configuration"),|ui|{
+                if ui.checkbox(&mut self.settings.auto_start_receiver,
+                    tr(lang,"下次启动时自动接收","Auto-start receiver on next launch")).changed(){
+                    self.persist_settings();
+                }
+                ui.horizontal_wrapped(|ui|{
+                    ui.label(tr(lang,"监听端口","Listening port"));
+                    let old=self.settings.listen_port;
+                    ui.add_enabled_ui(!self.state.started.load(Ordering::SeqCst),|ui|{
+                        if ui.add(egui::DragValue::new(&mut self.settings.listen_port)
+                            .range(1024..=65535).speed(1.0)).changed(){
+                            self.persist_settings();
+                        }
+                        if ui.button(tr(lang,"生成新端口","Generate port")).clicked(){
+                            self.settings.listen_port=generate_port(old);
+                            self.persist_settings();
+                        }
+                    });
+                });
+                ui.horizontal_wrapped(|ui|{
+                    ui.label(tr(lang,"配对密钥","Pairing key"));
+                    if ui.button(tr(lang,"重新生成密钥","Regenerate pairing key")).clicked(){
+                        self.settings.secret=generate_secret();
+                        self.persist_settings();
+                    }
+                });
+                ui.small(tr(lang,"端口和密钥变更后，需要重启接收端并更新控制端配置。",
+                    "After changing the port or key, restart the receiver and update the controller."));
+            });
+        }else{
+            section_card(ui,tr(lang,"鼠标体验","Mouse & pointer"),|ui|{
+                ui.label(tr(lang,"远程鼠标灵敏度","Remote mouse sensitivity"));
+                if ui.add(egui::Slider::new(&mut self.settings.mouse_speed,0.5..=4.0)
+                    .step_by(0.1).suffix("×")).changed(){
+                    self.state.set_mouse_speed(self.settings.mouse_speed);
+                    self.persist_settings();
+                }
+                ui.small(tr(lang,
+                    "Raw Input 不包含 Windows 系统鼠标加速，连接中也可调整。",
+                    "Raw Input bypasses Windows acceleration; this updates live."));
+            });
+        }
+    }
+
+    fn ui_diagnostics(&mut self,ui:&mut egui::Ui,lang:Language){
+        section_card(ui,tr(lang,"会话指标","Session metrics"),|ui|{
+            let rtt=self.state.rtt_ms.load(Ordering::Relaxed);
+            let connected=self.state.ready.load(Ordering::SeqCst);
+            let status=self.state.status.lock().unwrap().clone();
+            ui.label(format!("{}: {}",tr(lang,"状态","Status"),status.text(lang)));
+            ui.label(format!("{}: {}",tr(lang,"网络往返延迟","Network RTT"),
+                if rtt==u64::MAX{"—".to_string()}else{format!("{rtt} ms")}));
+            ui.label(format!("{}: {}",tr(lang,"原生鼠标数据包","Native mouse packets"),
+                self.state.native_motion_packets.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {} / {}",tr(lang,"鼠标按下 / 松开（捕获）","Mouse down/up captured"),
+                self.state.mouse_down_captured.load(Ordering::Relaxed),
+                self.state.mouse_up_captured.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {} / {}",tr(lang,"鼠标按下 / 松开（接收）","Mouse down/up received"),
+                self.state.mouse_down_received.load(Ordering::Relaxed),
+                self.state.mouse_up_received.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {}",tr(lang,"注入失败次数","Injection failures"),
+                self.state.mouse_injection_failures.load(Ordering::Relaxed)));
+            if !connected {
+                ui.small(tr(lang,"未连接时 RTT 不显示；日志仅保留最近事件。",
+                    "RTT is shown only when connected; recent events remain available."));
+            }
+            if ui.button(tr(lang,"复制完整诊断","Copy full diagnostics")).clicked(){
+                let diagnostic=format!(
+                    "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nNetwork RTT: {:?} ms\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    if self.settings.role_server{"receiver"}else{"controller"},
+                    if self.settings.role_server{"(receiver)"}else{self.settings.address.as_str()},
+                    self.settings.listen_port,
+                    self.state.started.load(Ordering::SeqCst),
+                    self.state.ready.load(Ordering::SeqCst),
+                    self.settings.mouse_speed,
+                    if rtt==u64::MAX{None}else{Some(rtt)},
+                    self.state.native_motion_packets.load(Ordering::Relaxed),
+                    self.state.mouse_down_captured.load(Ordering::Relaxed),
+                    self.state.mouse_up_captured.load(Ordering::Relaxed),
+                    self.state.mouse_down_received.load(Ordering::Relaxed),
+                    self.state.mouse_up_received.load(Ordering::Relaxed),
+                    self.state.mouse_injection_failures.load(Ordering::Relaxed),
+                    status.text(Language::En)
+                );
+                let history=self.state.history.lock().unwrap().iter()
+                    .cloned().collect::<Vec<_>>().join("\n");
+                ui.ctx().copy_text(format!("{diagnostic}\nRecent events:\n{history}"));
+            }
+        });
+        ui.add_space(12.0);
+        section_card(ui,tr(lang,"最近连接事件","Recent connection events"),|ui|{
+            let history=self.state.history.lock().unwrap();
+            if history.is_empty(){
+                ui.small(tr(lang,"暂无事件","No events yet"));
+            }else{
+                for line in history.iter().rev().take(20){
+                    ui.monospace(line);
+                }
+            }
+        });
+    }
+
 }
 
 impl eframe::App for KvmApp {
@@ -506,228 +805,59 @@ impl eframe::App for KvmApp {
             return;
         }
         if self.frames==4{launch_mark("full-ui-start");}
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("kvm");
-                ui.label(format!("v{}",env!("CARGO_PKG_VERSION")));
-                ui.label(tr(self.settings.language,
-                    "跨设备键鼠协作","Cross-device control"));
-                ui.separator();
-                ui.label("Language / 语言");
-                let selected = if self.settings.language == Language::Zh { "中文" } else { "English" };
-                let previous = self.settings.language;
-                egui::ComboBox::from_id_salt("language")
-                    .selected_text(selected)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.settings.language, Language::Zh, "中文");
-                        ui.selectable_value(&mut self.settings.language, Language::En, "English");
-                    });
-                if previous != self.settings.language { self.persist_settings(); }
-            });
-            let lang = self.settings.language;
-            if self.frames==4{launch_mark("full-ui-header-returned");}
-            if self.display_slow{
-                ui.colored_label(egui::Color32::YELLOW,tr(lang,
-                    "外接显示器检测较慢，当前使用安全的单屏回退布局；界面仍然可以操作。",
-                    "External display scan is slow; temporary single-monitor layout is active while the UI remains available."));
-            }
-            #[cfg(target_os="macos")]
-            if self.tray_attempted && self.tray.is_none(){
-                ui.colored_label(egui::Color32::YELLOW,tr(lang,
-                    "菜单栏入口初始化失败；此窗口保持可用，关闭窗口会退出。",
-                    "Menu bar status icon failed; this window remains accessible and closing it quits."));
-            }
-            ui.label(tr(lang,
-                "安全的局域网键盘鼠标共享 · Windows ↔ macOS",
-                "Secure LAN keyboard and mouse sharing · Windows ↔ macOS"));
-            ui.separator();
-            let started = self.state.started.load(Ordering::SeqCst);
-
-            ui.add_enabled_ui(!started, |ui| {
-                let previous = self.settings.role_server;
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut self.settings.role_server, true,
-                        tr(lang,"接收端（本机接受远程键鼠）","Receiver (this PC accepts remote input)"));
-                    ui.radio_value(&mut self.settings.role_server, false,
-                        tr(lang,"控制端（本机控制另一台）","Controller (this PC controls the other)"));
-                });
-                if previous != self.settings.role_server { self.persist_settings(); }
-                if self.settings.role_server {
-                    if ui.checkbox(&mut self.settings.auto_start_receiver,
-                        tr(lang,"应用启动时自动开始接收（下次启动生效）",
-                            "Start listening automatically at app launch (next launch)")).changed(){
-                        self.persist_settings();
+        let lang=self.settings.language;
+        egui::SidePanel::left("kvm-navigation")
+            .resizable(false)
+            .exact_width(182.0)
+            .show(ctx,|ui|{
+                ui.add_space(18.0);
+                ui.heading(egui::RichText::new("kvm").size(30.0).strong());
+                ui.small(format!("v{}",env!("CARGO_PKG_VERSION")));
+                ui.small(tr(lang,"跨设备键鼠共享","Cross-device KVM"));
+                ui.add_space(22.0);
+                for page in [UiPage::Overview,UiPage::Displays,UiPage::Preferences,UiPage::Diagnostics]{
+                    let label=page.label(lang);
+                    if ui.add_sized([ui.available_width(),38.0],
+                        egui::Button::selectable(self.page==page,label)).clicked(){
+                        self.page=page;
                     }
-                    ui.horizontal(|ui| {
-                        ui.label(tr(lang,"监听端口","Listening port"));
-                        let port_change = ui.add(egui::DragValue::new(&mut self.settings.listen_port)
-                            .range(1024..=65535).speed(1.0)).changed();
-                        if port_change { self.persist_settings(); }
-                        if ui.button(tr(lang,"重新生成端口","Generate new port")).clicked() {
-                            self.settings.listen_port = generate_port(self.settings.listen_port);
-                            self.persist_settings();
-                        }
-                    });
-                    ui.label(tr(lang,"配对密钥（填入控制端）","Pairing key (enter on the controller)"));
-                    ui.horizontal(|ui| {
-                        ui.monospace(&self.settings.secret);
-                        if ui.button(tr(lang,"复制密钥","Copy key")).clicked() {
-                            ui.ctx().copy_text(self.settings.secret.clone());
-                        }
-                        if ui.button(tr(lang,"重新生成密钥","Generate new key")).clicked() {
-                            self.settings.secret = generate_secret();
-                            self.persist_settings();
-                        }
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.label(tr(lang,"接收端 IP:端口","Receiver IP:port"));
-                        if ui.text_edit_singleline(&mut self.settings.address).changed() {
-                            self.persist_settings();
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(tr(lang,"配对密钥","Pairing key"));
-                        if ui.add(egui::TextEdit::singleline(&mut self.settings.secret).password(true)).changed() {
-                            self.persist_settings();
-                        }
-                    });
+                    ui.add_space(4.0);
                 }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT),|ui|{
+                    ui.add_space(12.0);
+                    let connected=self.state.ready.load(Ordering::Relaxed);
+                    let started=self.state.started.load(Ordering::Relaxed);
+                    let colour=if connected{egui::Color32::from_rgb(72,192,139)}
+                        else if started{egui::Color32::from_rgb(236,182,78)}
+                        else{ui.visuals().weak_text_color()};
+                    ui.colored_label(colour,if connected {
+                        tr(lang,"● 已连接","● Connected")
+                    }else if started{
+                        tr(lang,"● 正在运行","● Running")
+                    }else{tr(lang,"● 未连接","● Offline")});
+                });
             });
-            #[cfg(target_os="macos")]
-            if self.settings.role_server && !native_cursor::accessibility_trusted() {
-                ui.colored_label(egui::Color32::YELLOW,tr(lang,
-                    "未获得 macOS「辅助功能」权限：鼠标可移动，但点击和键盘注入可能被系统忽略。请在系统设置 → 隐私与安全性 → 辅助功能中授权 kvm。",
-                    "macOS Accessibility permission missing: cursor motion may work but clicks and keys can be blocked. Grant kvm access in System Settings > Privacy & Security > Accessibility."));
-            }
-            if self.settings.role_server {
-                self.receiver_addresses(ui,lang);
-                ui.small(format!("{}: TCP {}",tr(lang,"当前监听端口","Configured listening port"),self.settings.listen_port));
-                ui.small(tr(lang,
-                    "端口及密钥修改后会保存；连接启动后需重启程序才能更换端口。",
-                    "Port and key are saved; restart the app to change the port after listening starts."));
-            }
-            if ui.checkbox(&mut self.settings.remap,
-                tr(lang,"自动映射 Windows Ctrl ↔ macOS Command","Map Windows Ctrl ↔ macOS Command")).changed() {
-                self.state.remap.store(self.settings.remap,Ordering::SeqCst);
-                self.persist_settings();
-            }
-            if ui.checkbox(&mut self.settings.clipboard,
-                tr(lang,"按需同步剪贴板（仅纯文本，粘贴时传输）",
-                    "Clipboard on demand (plain text, transfer only on paste)")).changed() {
-                self.state.clipboard.store(self.settings.clipboard,Ordering::SeqCst);
-                self.persist_settings();
-            }
+        egui::CentralPanel::default().show(ctx,|ui|{
+            ui.add_space(12.0);
+            ui.heading(self.page.label(lang));
             ui.separator();
-            if self.frames==4{launch_mark("full-ui-inputs-returned");}
-            if !self.settings.role_server {
-                if self.frames==4{launch_mark("full-ui-layout-enter");}
-                self.layout_ui(ui,lang);
-                if self.frames==4{launch_mark("full-ui-layout-returned");}
-            } else {
-                ui.label(tr(lang,
-                    "请保持程序运行。macOS 需要授予「辅助功能」和「输入监控」权限。",
-                    "Keep the app running. macOS requires Accessibility and Input Monitoring permissions."));
-            }
-            if !self.settings.role_server {
-                ui.horizontal(|ui|{
-                    ui.label(tr(lang,"远程鼠标灵敏度","Remote mouse sensitivity"));
-                    if ui.add(egui::Slider::new(&mut self.settings.mouse_speed,0.5..=4.0)
-                        .step_by(0.1).suffix("×")).changed(){
-                        self.state.set_mouse_speed(self.settings.mouse_speed);
-                        self.persist_settings();
+            egui::ScrollArea::vertical().id_salt("kvm-main-scroll")
+                .auto_shrink([false,false]).show(ui,|ui|{
+                    ui.add_space(10.0);
+                    if self.display_slow{
+                        ui.colored_label(egui::Color32::YELLOW,tr(lang,
+                            "外接屏幕检测较慢，暂时使用单屏回退；重启后可刷新布局。",
+                            "Monitor scan is slow; using temporary single-screen fallback."));
+                        ui.add_space(12.0);
                     }
-                });
-                ui.small(tr(lang,
-                    "原始位移不含 Windows 系统加速；连接时也可调整。",
-                    "Raw Input bypasses Windows pointer acceleration; adjustable while connected."));
-                let rtt=self.state.rtt_ms.load(Ordering::Relaxed);
-                ui.small(if rtt==u64::MAX{
-                    tr(lang,"网络往返延迟：测量中 / 未连接","Network RTT: measuring / disconnected").to_string()
-                }else{
-                    format!("{}: {rtt} ms",tr(lang,"网络往返延迟","Network RTT"))
-                });
-            }
-            ui.separator();
-            if ui.add_enabled(!started, egui::Button::new(
-                if self.settings.role_server {tr(lang,"启动接收端","Start receiver")}
-                else {tr(lang,"连接并共享键鼠","Connect and share")})).clicked() {
-                self.persist_settings();
-                if self.settings.role_server {
-                    engine::start_server(self.state.clone(),self.settings.clone());
-                } else {
-                    engine::start_client(self.state.clone(),self.settings.clone());
-                }
-            }
-            if started {
-                let connected=self.state.ready.load(Ordering::SeqCst);
-                ui.horizontal(|ui|{
-                    if self.settings.role_server {
-                        if ui.add_enabled(connected,egui::Button::new(
-                            tr(lang,"断开当前控制端","Disconnect current controller"))).clicked(){
-                            self.state.disconnect_peer();
-                        }
-                        if ui.button(tr(lang,"停止接收","Stop receiver")).clicked(){
-                            self.state.stop();
-                        }
-                    } else if ui.button(tr(lang,"断开连接 / 取消连接","Disconnect / cancel connection")).clicked(){
-                        self.state.stop();
+                    match self.page{
+                        UiPage::Overview=>self.ui_overview(ui,lang),
+                        UiPage::Displays=>self.ui_displays(ui,lang),
+                        UiPage::Preferences=>self.ui_preferences(ui,lang),
+                        UiPage::Diagnostics=>self.ui_diagnostics(ui,lang),
                     }
+                    ui.add_space(22.0);
                 });
-            }
-            if started && !self.state.ready.load(Ordering::Relaxed) && !self.settings.role_server {
-                ui.small(tr(lang,
-                    "正在尝试连接：TCP 最长约 4 秒，配对和接收端响应也有超时。",
-                    "Connecting: TCP up to 4 seconds; pairing and receiver response are also time-limited."));
-            }
-            if self.frames==4{launch_mark("full-ui-status-enter");}
-            let status = self.state.status.lock().unwrap().clone();
-            let status_text=status.text(lang);
-            ui.horizontal_wrapped(|ui|{
-                ui.label(format!("{}: {}", tr(lang,"状态","Status"),status_text));
-                if ui.button(tr(lang,"复制诊断信息","Copy diagnostics")).clicked(){
-                    let diagnostic=format!(
-                        "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nNetwork RTT: {:?} ms\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
-                        env!("CARGO_PKG_VERSION"),
-                        std::env::consts::OS,
-                        if self.settings.role_server {"receiver"} else {"controller"},
-                        if self.settings.role_server {"(receiver)"} else {self.settings.address.as_str()},
-                        self.settings.listen_port,
-                        self.state.started.load(Ordering::SeqCst),
-                        self.state.ready.load(Ordering::SeqCst),
-                        self.settings.mouse_speed,
-                        {let v=self.state.rtt_ms.load(Ordering::Relaxed);if v==u64::MAX{None}else{Some(v)}},
-                        self.state.native_motion_packets.load(Ordering::Relaxed),
-                        self.state.mouse_down_captured.load(Ordering::Relaxed),
-                        self.state.mouse_up_captured.load(Ordering::Relaxed),
-                        self.state.mouse_down_received.load(Ordering::Relaxed),
-                        self.state.mouse_up_received.load(Ordering::Relaxed),
-                        self.state.mouse_injection_failures.load(Ordering::Relaxed),
-                        status.text(Language::En)
-                    );
-                    let history=self.state.history.lock().unwrap().iter()
-                        .cloned().collect::<Vec<_>>().join("\n");
-                    ui.ctx().copy_text(format!("{diagnostic}\nRecent events:\n{history}"));
-                }
-            });
-            egui::CollapsingHeader::new(tr(lang,"最近连接事件（保留断线原因）","Recent connection events"))
-                .default_open(true)
-                .show(ui,|ui|{
-                    let history=self.state.history.lock().unwrap();
-                    for line in history.iter().rev().take(8){
-                        ui.small(line);
-                    }
-                });
-            if self.state.active.load(Ordering::Relaxed) {
-                ui.colored_label(egui::Color32::LIGHT_GREEN,
-                    tr(lang,"正在控制远端 · F12 紧急返回","Remote control active · F12 emergency return"));
-            }
-            ui.small(tr(lang,
-                "当前支持一台控制端和一台接收端；不支持自动发现；请仅在可信局域网使用。",
-                "One controller + one receiver; no automatic discovery; trusted LAN only."));
-            if self.frames==4{launch_mark("full-ui-content-returned");}
-            });
         });
         if self.frames==4{launch_mark("full-ui-returned");}
         ctx.request_repaint_after(Duration::from_millis(200));
