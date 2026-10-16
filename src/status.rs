@@ -15,6 +15,8 @@ pub enum UiStatus {
     Connecting,
     InvalidAddress,
     ConnectFailed(String),
+    ConnectRefused(String),
+    NativeInputStarting,
     AwaitingInfo,
     Ready,
     Returned,
@@ -45,6 +47,12 @@ impl UiStatus {
             Connecting => (if zh {"正在连接…"} else {"Connecting…"}).into(),
             InvalidAddress => (if zh {"地址格式应为 IP:端口"} else {"Address must be IP:port"}).into(),
             ConnectFailed(e) => format!("{}: {e}", if zh {"网络连接失败"} else {"Connection failed"}),
+            ConnectRefused(addr) => if zh {
+                format!("连接被拒绝（{addr}）：请在 Mac 接收端点击「启动接收端」，并核对 IP、端口和防火墙")
+            } else {
+                format!("Connection refused ({addr}): start the Mac receiver and check IP, port and firewall")
+            },
+            NativeInputStarting => (if zh {"配对成功，正在初始化本机鼠标捕获…"} else {"Paired; initializing native mouse capture…"}).into(),
             AwaitingInfo => (if zh {"等待接收端信息…"} else {"Waiting for receiver information…"}).into(),
             Ready => (if zh {"已连接；将鼠标推到设置的屏幕边缘（F12 返回）"} else {"Connected; move to the configured screen edge (F12 to return)"}).into(),
             Returned => (if zh {"已返回本机"} else {"Returned to local computer"}).into(),
