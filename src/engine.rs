@@ -105,6 +105,18 @@ impl Shared {
         self.pending_dx.fetch_add(dx.clamp(-2000,2000),Ordering::Relaxed);
         self.pending_dy.fetch_add(dy.clamp(-2000,2000),Ordering::Relaxed);
     }
+    #[cfg(target_os="windows")]
+    pub fn add_native_button(&self,button:rdev::Button,pressed:bool){
+        if !self.ready.load(Ordering::Relaxed) ||
+           !self.active.load(Ordering::Relaxed) {return;}
+        if pressed {
+            self.mouse_down_captured.fetch_add(1,Ordering::Relaxed);
+            self.send(Wire::Input(EventType::ButtonPress(button)));
+        }else{
+            self.mouse_up_captured.fetch_add(1,Ordering::Relaxed);
+            self.send(Wire::Input(EventType::ButtonRelease(button)));
+        }
+    }
     pub fn native_motion_stopped(&self,error:String){
         self.native_started.store(false,Ordering::SeqCst);
         self.shutdown_peer();
@@ -596,13 +608,21 @@ fn capture(shared:Arc<Shared>) {
                 if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
             }
             EventType::ButtonPress(_) if remote => {
-                hook_shared.mouse_down_captured.fetch_add(1,Ordering::Relaxed);
-                hook_shared.send(Wire::Input(et));
+                // Windows forwards RAWMOUSE button flags instead of duplicating
+                // these rdev hook events. The hook still suppresses local input.
+                #[cfg(not(target_os="windows"))]
+                {
+                    hook_shared.mouse_down_captured.fetch_add(1,Ordering::Relaxed);
+                    hook_shared.send(Wire::Input(et));
+                }
                 return None;
             }
             EventType::ButtonRelease(_) if remote => {
-                hook_shared.mouse_up_captured.fetch_add(1,Ordering::Relaxed);
-                hook_shared.send(Wire::Input(et));
+                #[cfg(not(target_os="windows"))]
+                {
+                    hook_shared.mouse_up_captured.fetch_add(1,Ordering::Relaxed);
+                    hook_shared.send(Wire::Input(et));
+                }
                 return None;
             }
             EventType::MouseMove{x,y}=>{

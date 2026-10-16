@@ -84,6 +84,19 @@ mod platform {
     const RIDEV_INPUTSINK:u32=0x0000_0100;
     const RIM_TYPEMOUSE:u32=0;
     const MOUSE_MOVE_ABSOLUTE:u16=0x0001;
+    // RAWMOUSE.usButtonFlags, see Win32 RI_MOUSE_*_BUTTON_{DOWN,UP}.
+    fn button_changes(flags:u16)->Vec<(rdev::Button,bool)>{
+        let mut result=Vec::new();
+        for (down,up,button) in [
+            (0x0001,0x0002,rdev::Button::Left),
+            (0x0004,0x0008,rdev::Button::Right),
+            (0x0010,0x0020,rdev::Button::Middle)
+        ] {
+            if flags&down!=0 {result.push((button,true));}
+            if flags&up!=0 {result.push((button,false));}
+        }
+        result
+    }
     const HWND_MESSAGE:isize=-3;
 
     #[repr(C)]
@@ -143,15 +156,22 @@ mod platform {
                 if kind==RIM_TYPEMOUSE {
                     let data=raw.as_ptr().add(h);
                     let flags=ptr::read_unaligned(data.cast::<u16>());
-                    if (flags&MOUSE_MOVE_ABSOLUTE)==0 {
-                        let dx=ptr::read_unaligned(data.add(12).cast::<i32>());
-                        let dy=ptr::read_unaligned(data.add(16).cast::<i32>());
-                        MOUSE_TARGET.with(|slot|{
-                            if let Some(target)=slot.borrow().as_ref(){
+                    // usButtonFlags lives at offset +4 in RAWMOUSE.
+                    let button_flags=ptr::read_unaligned(data.add(4).cast::<u16>());
+                    let dx=ptr::read_unaligned(data.add(12).cast::<i32>());
+                    let dy=ptr::read_unaligned(data.add(16).cast::<i32>());
+                    MOUSE_TARGET.with(|slot|{
+                        if let Some(target)=slot.borrow().as_ref(){
+                            if (flags&MOUSE_MOVE_ABSOLUTE)==0 && (dx!=0||dy!=0){
                                 target.add_native_motion(dx,dy);
                             }
-                        });
-                    }
+                            if button_flags!=0 {
+                                for (button,pressed) in button_changes(button_flags) {
+                                    target.add_native_button(button,pressed);
+                                }
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -205,6 +225,13 @@ mod tests {
 
     // Windows CI smoke test: compilation alone cannot reveal failed window-class
     // registration, wrong FFI struct layout, or RegisterRawInputDevices errors.
+    #[test]
+    fn mouse_button_flag_mapping(){
+        use rdev::Button;
+        let events=platform::button_changes(0x0001 | 0x0008 | 0x0010);
+        assert_eq!(events,vec![(Button::Left,true),(Button::Right,false),(Button::Middle,true)]);
+        assert!(platform::button_changes(0).is_empty());
+    }
     #[test]
     fn raw_input_registration_works() {
         let shared=crate::engine::Shared::new(&crate::model::Settings::default());
