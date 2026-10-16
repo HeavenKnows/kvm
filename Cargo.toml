@@ -1,6 +1,6 @@
 [package]
 name = "kvm"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
 description = "Experimental pure-Rust software KVM for Windows and macOS"
@@ -16,3 +16,4 @@ snow = "0.10"
 sha2 = "0.10"
 rand = "0.8"
 dirs = "6"
+if-addrs = "0.15"

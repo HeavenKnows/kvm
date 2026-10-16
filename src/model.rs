@@ -70,7 +70,12 @@ impl Platform {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Language { Zh, En }
+impl Default for Language { fn default()->Self { Self::Zh } }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub role_server: bool,
     pub address: String,
@@ -78,11 +83,14 @@ pub struct Settings {
     pub layout: Layout,
     pub remap: bool,
     pub clipboard: bool,
+    pub language: Language,
+    pub listen_port: u16,
 }
 impl Default for Settings {
     fn default()->Self { Self {
         role_server: false, address:"192.168.1.10:24881".into(),
         secret:String::new(), layout:Layout::default(), remap:true, clipboard:true,
+        language:Language::Zh, listen_port:24881,
     } }
 }
 
@@ -96,7 +104,8 @@ pub fn load()->Settings {
     let legacy_path = dirs::config_dir().map(|p|p.join("crosskey").join("settings.json"));
     new_path.and_then(|p| std::fs::read(p).ok())
         .or_else(|| legacy_path.and_then(|p| std::fs::read(p).ok()))
-        .and_then(|b| serde_json::from_slice(&b).ok())
+        .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
+        .map(|mut s| { if s.listen_port < 1024 {s.listen_port = 24881;} s })
         .unwrap_or_default()
 }
 pub fn save(s:&Settings){
@@ -115,6 +124,12 @@ mod tests {
         assert!(l.entering(1919,200,a,b));
         assert_eq!(l.entry(1919,200,a,b),(3,100));
         assert!(!l.entering(1919,20,a,b));
+    }
+    #[test] fn backwards_compatible_settings(){
+        let old=r#"{"role_server":false,"address":"192.168.1.2:24881","secret":"","layout":{"side":"Right","offset":0},"remap":true,"clipboard":true}"#;
+        let s:Settings=serde_json::from_str(old).unwrap();
+        assert_eq!(s.listen_port,24881);
+        assert_eq!(s.language,Language::Zh);
     }
     #[test] fn each_direction(){
         let a=Screen::new(1920,1080); let b=Screen::new(1440,900);
