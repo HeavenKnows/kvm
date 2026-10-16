@@ -94,7 +94,12 @@ jobs:
           PLIST
           plutil -lint "$APP/Contents/Info.plist"
           codesign --force --sign - --timestamp=none "$APP"
-          hdiutil create -volname "kvm" -srcfolder "$APP" -ov -format UDZO \
+          # Conventional drag-to-Applications DMG. Finder shows kvm.app
+          # alongside a symlink to the system Applications folder.
+          mkdir -p dist/dmg-root
+          mv "$APP" dist/dmg-root/kvm.app
+          ln -s /Applications dist/dmg-root/Applications
+          hdiutil create -volname "kvm" -srcfolder "dist/dmg-root" -ov -format UDZO \
             "dist/${{ matrix.artifact }}.dmg"
 
       # GitHub Artifacts itself downloads as a ZIP. Upload files directly,
