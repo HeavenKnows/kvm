@@ -77,6 +77,11 @@ fn record_fault(out:&Arc<Mutex<Option<String>>>,text:String) {
 pub fn connect(mut stream:TcpStream,secret:&str,initiator:bool)
     ->io::Result<(SyncSender<Wire>,Receiver<Wire>,TcpStream,Arc<Mutex<Option<String>>>)>
 {
+    // A receiver may accept() from a nonblocking TcpListener. On some
+    // systems the accepted socket retains O_NONBLOCK. Noise framing below
+    // uses read_exact/write_all in background threads and REQUIRES blocking
+    // I/O. EAGAIN/WouldBlock is not a peer disconnect.
+    stream.set_nonblocking(false)?;
     stream.set_nodelay(true)?;
     let noise=Arc::new(Mutex::new(handshake(&mut stream,secret,initiator)?));
     let mut writer=stream.try_clone()?;
@@ -150,9 +155,22 @@ mod tests {
     #[test]
     fn encrypted_loopback_roundtrip() {
         let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let addr=listener.local_addr().unwrap();
         let responder=std::thread::spawn(move || {
-            let (socket,_)=listener.accept().unwrap();
+            // Simulate the macOS receiver's nonblocking accept loop.
+            let socket=loop {
+                match listener.accept(){
+                    Ok((socket,_))=>break socket,
+                    Err(ref e) if e.kind()==io::ErrorKind::WouldBlock=>{
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(e)=>panic!("accept failed: {e}"),
+                }
+            };
+            // Deliberately make the accepted socket nonblocking to reproduce
+            // macOS EAGAIN, regardless of whether this OS inherits the flag.
+            socket.set_nonblocking(true).unwrap();
             let (tx,rx,_socket,reason)=connect(socket,"0123456789abcdef0123456789abcdef",false).unwrap();
             tx.send(Wire::Hello{os:Platform::Mac,screen:Screen::new(1440,900)}).unwrap();
             match rx.recv_timeout(Duration::from_secs(3)).unwrap(){
@@ -170,6 +188,9 @@ mod tests {
             }
             msg=>panic!("unexpected initial packet: {msg:?}, reason={:?}",reason.lock().unwrap()),
         }
+        // Both encrypted reader threads must survive a quiet interval.
+        // Previously a nonblocking accepted socket died immediately here.
+        std::thread::sleep(Duration::from_millis(80));
         tx.send(Wire::MoveBy{dx:7,dy:-4}).unwrap();
         assert!(matches!(rx.recv_timeout(Duration::from_secs(3)).unwrap(),Wire::Back));
         responder.join().unwrap();

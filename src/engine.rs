@@ -214,6 +214,13 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                 }
             };
             if shared.stop_requested.load(Ordering::SeqCst){break;}
+            // The listener is nonblocking so Stop receiver can release its
+            // port. The accepted *connection* must be blocking for the
+            // encrypted framed protocol (macOS otherwise returns EAGAIN).
+            if let Err(e)=stream.set_nonblocking(false){
+                shared.info(UiStatus::AcceptFailed(format!("restore blocking connection: {e}")));
+                continue;
+            }
             if let Err(e)=shared.store_socket(&stream){
                 shared.info(UiStatus::AcceptFailed(e.to_string()));
                 continue;
