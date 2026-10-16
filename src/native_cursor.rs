@@ -16,6 +16,7 @@ mod mac {
         fn CGWarpMouseCursorPosition(p:Point)->i32;
         fn CGEventCreateMouseEvent(source:*const c_void,event_type:u32,point:Point,button:u32)->*mut c_void;
         fn CGEventPost(tap_location:u32,event:*mut c_void);
+        fn AXIsProcessTrusted()->bool;
     }
     #[link(name="CoreFoundation",kind="framework")]
     extern "C" {
@@ -34,7 +35,11 @@ mod mac {
             _=>None,
         }
     }
+    pub fn trusted()->bool{unsafe{AXIsProcessTrusted()}}
     pub fn click(button:rdev::Button,pressed:bool,x:i32,y:i32)->Result<(),String>{
+        if !trusted() {
+            return Err("macOS Accessibility permission is not granted to kvm.app; enable it in System Settings > Privacy & Security > Accessibility".into());
+        }
         let (kind,which)=button_mapping(button,pressed)
             .ok_or_else(||format!("Unsupported mouse button: {button:?}"))?;
         let bounds=unsafe{CGDisplayBounds(CGMainDisplayID())};
@@ -96,4 +101,12 @@ pub fn button_event(button:rdev::Button,pressed:bool,x:i32,y:i32)->Result<(),Str
                   else {rdev::EventType::ButtonRelease(button)};
         rdev::simulate(&event).map_err(|e|format!("Cannot simulate {event:?}: {e:?}"))
     }
+}
+
+/// Whether macOS has authorized this application to synthesize mouse clicks.
+pub fn accessibility_trusted()->bool{
+    #[cfg(target_os="macos")]
+    {mac::trusted()}
+    #[cfg(not(target_os="macos"))]
+    {true}
 }

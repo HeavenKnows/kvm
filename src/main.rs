@@ -322,6 +322,12 @@ impl eframe::App for KvmApp {
                     });
                 }
             });
+            #[cfg(target_os="macos")]
+            if self.settings.role_server && !native_cursor::accessibility_trusted() {
+                ui.colored_label(egui::Color32::YELLOW,tr(lang,
+                    "未获得 macOS「辅助功能」权限：鼠标可移动，但点击和键盘注入可能被系统忽略。请在系统设置 → 隐私与安全性 → 辅助功能中授权 kvm。",
+                    "macOS Accessibility permission missing: cursor motion may work but clicks and keys can be blocked. Grant kvm access in System Settings > Privacy & Security > Accessibility."));
+            }
             if self.settings.role_server {
                 self.receiver_addresses(ui,lang);
                 ui.small(format!("{}: TCP {}",tr(lang,"当前监听端口","Configured listening port"),self.settings.listen_port));

@@ -177,3 +177,5 @@ cargo build --release
 - 双端的「复制诊断信息」加入 `Mouse captured down/up`、`Mouse received down/up` 和 `Mouse injection failures`。如果点击仍无效，可以判断是 Windows 没捕获事件、网络没送达还是 Mac 注入失败。macOS 仍需要授予应用辅助功能权限。
 - CI 暂时只构建 **Windows x64** 和 **macOS Apple Silicon**，按要求停止构建 Intel Mac。
 - 当前版本进行了鼠标事件序列化单元测试；真正点击应用按钮需要实机验证，GitHub CI 不具备 macOS 交互式桌面测试条件。
+
+macOS 注入鼠标点击前会检查 `AXIsProcessTrusted()`，若尚未授权会显示明确错误；接收端界面也会有醒目的辅助功能权限提醒。重装或替换未公证的 DMG 应用后，系统可能需要重新授权。请在 macOS「系统设置 → 隐私与安全性 → 辅助功能」中确认已为运行中的 `kvm.app` 授权。
