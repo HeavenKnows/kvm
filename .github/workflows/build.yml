@@ -46,6 +46,12 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Generate branded app icon
+        shell: bash
+        run: |
+          python -m pip install --quiet pillow
+          python scripts/generate_icon.py
+
       - name: Run Rust unit tests
         shell: bash
         run: cargo test --target "${{ matrix.target }}"
@@ -67,7 +73,8 @@ jobs:
         run: |
           set -euo pipefail
           APP="dist/kvm.app"
-          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          iconutil -c icns "dist/branding/kvm.iconset" -o "$APP/Contents/Resources/kvm.icns"
           cp "target/${{ matrix.target }}/release/kvm" "$APP/Contents/MacOS/kvm"
           chmod 755 "$APP/Contents/MacOS/kvm"
           cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -79,8 +86,9 @@ jobs:
             <key>CFBundleDisplayName</key><string>kvm</string>
             <key>CFBundleIdentifier</key><string>dev.heavenknows.kvm</string>
             <key>CFBundleExecutable</key><string>kvm</string>
+            <key>CFBundleIconFile</key><string>kvm.icns</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>0.4.6</string>
+            <key>CFBundleShortVersionString</key><string>0.5.0</string>
             <key>CFBundleVersion</key><string>1</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
