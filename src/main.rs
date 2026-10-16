@@ -34,14 +34,14 @@ fn launch_mark(stage:&str){
 #[cfg(not(target_os="macos"))]
 fn launch_mark(_stage:&str){}
 
-fn install_chinese_font_async(ctx:&egui::Context){
-    let ctx=ctx.clone();
-    std::thread::spawn(move ||{
-        launch_mark("font-load-start");
-        install_chinese_font(&ctx);
-        launch_mark("font-load-done");
-        ctx.request_repaint();
-    });
+// set_fonts must not race with the GUI's first layout/paint pass.
+// The macOS system-font override is temporarily disabled while diagnosing
+// startup hangs. The default egui font stack remains available.
+fn install_initial_fonts(ctx:&egui::Context){
+    #[cfg(not(target_os="macos"))]
+    install_chinese_font(ctx);
+    #[cfg(target_os="macos")]
+    {let _=ctx;launch_mark("macos-system-font-override-disabled");}
 }
 
 fn tr(lang: Language, zh: &'static str, en: &'static str) -> &'static str {
@@ -334,10 +334,12 @@ impl eframe::App for KvmApp {
                 Ok(desktop)=>{
                     launch_mark("display-result-received");
                     let origin=(desktop.origin_x,desktop.origin_y);
+                    launch_mark("display-topology-apply-start");
                     if self.state.update_local_desktop(desktop){
                         native_cursor::set_global_origin(origin.0,origin.1);
                         self.display_loaded=true;
                         self.display_slow=false;
+                        launch_mark("display-topology-apply-done");
                     }else{
                         self.display_slow=true;
                         launch_mark("display-pending-session-restart");
@@ -401,6 +403,30 @@ impl eframe::App for KvmApp {
                 macos_tray::activate_app();
             }
         }
+        // Render a tiny first frame so that accessory windows obtain a valid
+        // native surface and the event loop can run before constructing menus
+        // or the full multi-monitor editor.
+        if self.frames==1 {
+            launch_mark("minimal-first-frame-enter");
+            egui::CentralPanel::default().show(ctx,|ui|{
+                ui.heading("kvm");
+                ui.label("Starting settings…");
+            });
+            launch_mark("minimal-first-frame-return");
+            ctx.request_repaint();
+            return;
+        }
+        if self.frames<=3 {
+            launch_mark("minimal-startup-frame-enter");
+            egui::CentralPanel::default().show(ctx,|ui|{
+                ui.heading("kvm");
+                ui.label("Opening settings…");
+            });
+            launch_mark("minimal-startup-frame-return");
+            ctx.request_repaint();
+            return;
+        }
+        if self.frames==4{launch_mark("full-ui-start");}
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -618,6 +644,7 @@ impl eframe::App for KvmApp {
                 "One controller + one receiver; no automatic discovery; trusted LAN only."));
             });
         });
+        if self.frames==4{launch_mark("full-ui-returned");}
         ctx.request_repaint_after(Duration::from_millis(200));
     }
 }
@@ -634,7 +661,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native("kvm",options,
         Box::new(|cc| {
             launch_mark("app-creator-enter");
-            install_chinese_font_async(&cc.egui_ctx);
+            install_initial_fonts(&cc.egui_ctx);
             let app=KvmApp::new(model::load());
             launch_mark("app-creator-return");
             Ok(Box::new(app))
