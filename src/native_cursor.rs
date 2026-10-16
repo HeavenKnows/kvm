@@ -48,14 +48,21 @@ mod mac {
     pub fn motion_while_held(x:i32,y:i32,button:rdev::Button)->Result<(),String>{
         if !trusted(){return Err("macOS Accessibility permission is not granted".into());}
         let (kind,which)=movement_kind(Some(button));
-        let rect=unsafe{CGDisplayBounds(CGMainDisplayID())};
-        let pos=Point{x:rect.origin.x+x as f64,y:rect.origin.y+y as f64};
+        let pos=global_point(x,y);
         let event=unsafe{CGEventCreateMouseEvent(std::ptr::null(),kind,pos,which)};
         if event.is_null(){return Err(format!("CGEventCreateMouseEvent for drag type {kind} failed"));}
         // Do not warp during a held drag: CGEventPost dispatches actual
         // LeftMouseDragged/RightMouseDragged to the destination window.
         unsafe{CGEventPost(0,event);CFRelease(event);}
         Ok(())
+    }
+    fn global_point(x:i32,y:i32)->Point{
+        static ORIGIN:std::sync::OnceLock<(i32,i32)>=std::sync::OnceLock::new();
+        let &(ox,oy)=ORIGIN.get_or_init(||{
+            let d=crate::display::current();
+            (d.origin_x,d.origin_y)
+        });
+        Point{x:(ox+x) as f64,y:(oy+y) as f64}
     }
     pub fn trusted()->bool{unsafe{AXIsProcessTrusted()}}
     pub fn click(button:rdev::Button,pressed:bool,x:i32,y:i32)->Result<(),String>{
@@ -64,8 +71,7 @@ mod mac {
         }
         let (kind,which)=button_mapping(button,pressed)
             .ok_or_else(||format!("Unsupported mouse button: {button:?}"))?;
-        let bounds=unsafe{CGDisplayBounds(CGMainDisplayID())};
-        let point=Point{x:bounds.origin.x+x as f64,y:bounds.origin.y+y as f64};
+        let point=global_point(x,y);
         let event=unsafe{CGEventCreateMouseEvent(std::ptr::null(),kind,point,which)};
         if event.is_null(){return Err(format!("CGEventCreateMouseEvent failed: {button:?} pressed={pressed}"));}
         // kCGHIDEventTap = 0. Requires Accessibility permission for this app.
@@ -90,13 +96,10 @@ mod mac {
         }
     }
     pub fn dimensions()->(i32,i32){
-        let rect=unsafe{CGDisplayBounds(CGMainDisplayID())};
-        ((rect.size.width.round() as i32).max(100),
-         (rect.size.height.round() as i32).max(100))
+        let s=crate::display::current().screen();(s.w,s.h)
     }
     pub fn move_to(x:i32,y:i32)->Result<(),String>{
-        let rect=unsafe{CGDisplayBounds(CGMainDisplayID())};
-        let point=Point{x:rect.origin.x+x as f64,y:rect.origin.y+y as f64};
+        let point=global_point(x,y);
         let code=unsafe{CGWarpMouseCursorPosition(point)};
         if code==0{Ok(())}else{Err(format!("macOS cursor warp failed: CGError {code}"))}
     }
@@ -105,13 +108,15 @@ pub fn screen_size()->(i32,i32){
     #[cfg(target_os="macos")]
     {return mac::dimensions();}
     #[cfg(not(target_os="macos"))]
-    {let (w,h)=rdev::display_size().unwrap_or((1920,1080));(w as i32,h as i32)}
+    {let s=crate::display::current().screen();(s.w,s.h)}
 }
 pub fn move_to(x:i32,y:i32)->Result<(),String>{
     #[cfg(target_os="macos")]
     {return mac::move_to(x,y);}
     #[cfg(not(target_os="macos"))]
-    {rdev::simulate(&rdev::EventType::MouseMove{x:x as f64,y:y as f64})
+    {let desktop=crate::display::current();
+     rdev::simulate(&rdev::EventType::MouseMove{
+         x:(x+desktop.origin_x) as f64,y:(y+desktop.origin_y) as f64})
         .map_err(|e|format!("Cannot simulate mouse movement: {e:?}"))}
 }
 
