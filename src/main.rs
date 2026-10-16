@@ -205,6 +205,7 @@ impl KvmApp {
         let local=self.state.local_displays();
         let remote=self.state.remote_displays.lock().unwrap().clone();
         if local.is_empty()||remote.is_empty(){return;}
+        if self.frames==4{launch_mark("layout-displays-snapshotted");}
         self.settings.local_display=self.settings.local_display.min(local.len()-1);
         self.settings.remote_display=self.settings.remote_display.min(remote.len()-1);
         ui.heading(tr(lang,"显示器布局","Display arrangement"));
@@ -221,12 +222,20 @@ impl KvmApp {
         });
         let (area,_)=ui.allocate_exact_size(
             egui::vec2(ui.available_width().min(730.0),365.0),egui::Sense::hover());
-        let scale=(area.width()/(self.state.local_screen().w.max(self.state.remote_screen.lock().unwrap().w) as f32*3.1))
-            .min(area.height()/(self.state.local_screen().h.max(self.state.remote_screen.lock().unwrap().h) as f32*3.2))
+        // CRITICAL: take each screen snapshot once, then DROP the MutexGuard
+        // before calculating layout. In the old chained width.min(height)
+        // expression remote_screen.lock() appeared twice; Rust extends its
+        // temporary guard to the end of the entire let statement, so the
+        // second lock deadlocked the GUI on the first full settings frame.
+        let local_size=self.state.local_screen();
+        let remote_size={*self.state.remote_screen.lock().unwrap()};
+        let scale=(area.width()/(local_size.w.max(remote_size.w) as f32*3.1))
+            .min(area.height()/(local_size.h.max(remote_size.h) as f32*3.2))
             .clamp(0.012,0.22);
         let local_origin=area.center()-egui::vec2(
-            self.state.local_screen().w as f32*scale*0.5,
-            self.state.local_screen().h as f32*scale*0.5);
+            local_size.w as f32*scale*0.5,
+            local_size.h as f32*scale*0.5);
+        if self.frames==4{launch_mark("layout-screen-scale-computed");}
         let painter=ui.painter();
         painter.rect_filled(area,12.0,egui::Color32::from_rgb(19,28,46));
         let to_rect=|d:Display,gx:i32,gy:i32|{
@@ -450,6 +459,7 @@ impl eframe::App for KvmApp {
                 if previous != self.settings.language { self.persist_settings(); }
             });
             let lang = self.settings.language;
+            if self.frames==4{launch_mark("full-ui-header-returned");}
             if self.display_slow{
                 ui.colored_label(egui::Color32::YELLOW,tr(lang,
                     "外接显示器检测较慢，当前使用安全的单屏回退布局；界面仍然可以操作。",
@@ -543,8 +553,11 @@ impl eframe::App for KvmApp {
                 self.persist_settings();
             }
             ui.separator();
+            if self.frames==4{launch_mark("full-ui-inputs-returned");}
             if !self.settings.role_server {
+                if self.frames==4{launch_mark("full-ui-layout-enter");}
                 self.layout_ui(ui,lang);
+                if self.frames==4{launch_mark("full-ui-layout-returned");}
             } else {
                 ui.label(tr(lang,
                     "请保持程序运行。macOS 需要授予「辅助功能」和「输入监控」权限。",
@@ -601,6 +614,7 @@ impl eframe::App for KvmApp {
                     "正在尝试连接：TCP 最长约 4 秒，配对和接收端响应也有超时。",
                     "Connecting: TCP up to 4 seconds; pairing and receiver response are also time-limited."));
             }
+            if self.frames==4{launch_mark("full-ui-status-enter");}
             let status = self.state.status.lock().unwrap().clone();
             let status_text=status.text(lang);
             ui.horizontal_wrapped(|ui|{
@@ -645,6 +659,7 @@ impl eframe::App for KvmApp {
             ui.small(tr(lang,
                 "当前支持一台控制端和一台接收端；不支持自动发现；请仅在可信局域网使用。",
                 "One controller + one receiver; no automatic discovery; trusted LAN only."));
+            if self.frames==4{launch_mark("full-ui-content-returned");}
             });
         });
         if self.frames==4{launch_mark("full-ui-returned");}
@@ -669,4 +684,28 @@ fn main() -> eframe::Result<()> {
             launch_mark("app-creator-return");
             Ok(Box::new(app))
         }))
+}
+
+/// Exercise the actual egui multi-monitor editor, not just geometry helpers.
+/// Before the one-snapshot fix, it tried to lock remote_screen a second time
+/// inside the same let expression and blocked the test thread indefinitely.
+#[cfg(test)]
+mod ui_deadlock_tests {
+    use super::*;
+    #[test]
+    fn controller_layout_first_full_frame_completes() {
+        let (tx,rx)=mpsc::channel();
+        std::thread::spawn(move || {
+            let mut app=KvmApp::new(Settings::default());
+            let ctx=egui::Context::default();
+            let _=ctx.run(egui::RawInput::default(),|ctx|{
+                egui::CentralPanel::default().show(ctx,|ui|{
+                    app.layout_ui(ui,Language::En);
+                });
+            });
+            let _=tx.send(());
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(8)).is_ok(),
+            "multi-monitor layout hung while rendering its first full frame");
+    }
 }
