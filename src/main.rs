@@ -201,7 +201,7 @@ impl KvmApp {
     /// becomes the crossing anchor and the pair snaps exactly together.
     fn layout_ui(&mut self,ui:&mut egui::Ui,lang:Language){
         use model::{Display,group_origin,snap_to_edge};
-        let local=self.state.local_displays.clone();
+        let local=self.state.local_displays();
         let remote=self.state.remote_displays.lock().unwrap().clone();
         if local.is_empty()||remote.is_empty(){return;}
         self.settings.local_display=self.settings.local_display.min(local.len()-1);
@@ -220,12 +220,12 @@ impl KvmApp {
         });
         let (area,_)=ui.allocate_exact_size(
             egui::vec2(ui.available_width().min(730.0),365.0),egui::Sense::hover());
-        let scale=(area.width()/(self.state.local_screen.w.max(self.state.remote_screen.lock().unwrap().w) as f32*3.1))
-            .min(area.height()/(self.state.local_screen.h.max(self.state.remote_screen.lock().unwrap().h) as f32*3.2))
+        let scale=(area.width()/(self.state.local_screen().w.max(self.state.remote_screen.lock().unwrap().w) as f32*3.1))
+            .min(area.height()/(self.state.local_screen().h.max(self.state.remote_screen.lock().unwrap().h) as f32*3.2))
             .clamp(0.012,0.22);
         let local_origin=area.center()-egui::vec2(
-            self.state.local_screen.w as f32*scale*0.5,
-            self.state.local_screen.h as f32*scale*0.5);
+            self.state.local_screen().w as f32*scale*0.5,
+            self.state.local_screen().h as f32*scale*0.5);
         let painter=ui.painter();
         painter.rect_filled(area,12.0,egui::Color32::from_rgb(19,28,46));
         let to_rect=|d:Display,gx:i32,gy:i32|{
@@ -623,16 +623,20 @@ impl eframe::App for KvmApp {
 }
 
 fn main() -> eframe::Result<()> {
+    launch_mark("main-enter");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 730.0])
-            // Normal macOS foreground app, visible in Dock and Cmd+Tab.
-            // Do not rely on a menu-bar icon as the only window entry point.
+            // Mac is a Dock-less menu-bar app, but Settings starts visible.
             .with_visible(true),
         ..Default::default()
     };
+    launch_mark("before-run-native");
     eframe::run_native("kvm",options,
         Box::new(|cc| {
-            install_chinese_font(&cc.egui_ctx);
-            Ok(Box::new(KvmApp::new(model::load())))
+            launch_mark("app-creator-enter");
+            install_chinese_font_async(&cc.egui_ctx);
+            let app=KvmApp::new(model::load());
+            launch_mark("app-creator-return");
+            Ok(Box::new(app))
         }))
 }
