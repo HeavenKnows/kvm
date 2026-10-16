@@ -7,6 +7,11 @@ on:
 permissions:
   contents: read
 
+# Cancel obsolete branch builds when a newer commit is pushed.
+concurrency:
+  group: kvm-ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: ${{ matrix.name }}
