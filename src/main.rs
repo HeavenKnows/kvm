@@ -9,8 +9,6 @@ mod network;
 mod native_motion;
 mod native_cursor;
 mod display;
-#[cfg(target_os="macos")]
-mod macos_tray;
 
 use eframe::egui;
 use model::{Language, Layout, Settings, Side};
@@ -96,11 +94,9 @@ struct KvmApp {
     ips: Vec<Ipv4Addr>,
     drag_start_layout: Option<Layout>,
     drag_start_group:Option<(i32,i32)>,
-    #[cfg(target_os="macos")]
-    tray: Option<macos_tray::MacMenuBar>,
 }
 impl KvmApp {
-    fn new(mut settings: Settings, ctx: &egui::Context) -> Self {
+    fn new(mut settings: Settings) -> Self {
         if settings.secret.len() != 32 { settings.secret = generate_secret(); }
         let state = engine::Shared::new(&settings);
         // A menu-bar receiver should actually listen after launch, not wait
@@ -108,22 +104,9 @@ impl KvmApp {
         if settings.role_server && settings.auto_start_receiver {
             engine::start_server(state.clone(),settings.clone());
         }
-        #[cfg(target_os="macos")]
-        let tray = match macos_tray::MacMenuBar::new(ctx, settings.language, state.clone()) {
-            Ok(tray) => Some(tray),
-            Err(e) => {
-                eprintln!("Failed to create status bar icon: {e}");
-                // Never strand the user with an invisible window and no menu.
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                ctx.request_repaint();
-                None
-            }
-        };
         Self { settings, state, ips: network::local_ipv4_addresses(),
             drag_start_layout:None,
             drag_start_group:None,
-            #[cfg(target_os="macos")]
-            tray,
         }
     }
     fn persist_settings(&self) { model::save(&self.settings); }
@@ -285,17 +268,6 @@ impl KvmApp {
 
 impl eframe::App for KvmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        #[cfg(target_os="macos")]
-        {
-            if let Some(tray) = &mut self.tray {
-                tray.set_language(self.settings.language);
-                if ctx.input(|i| i.viewport().close_requested()) && !tray.quitting() {
-                    // Closing Settings hides it; the menu bar keeps KVM running.
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-                }
-            }
-        }
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -316,12 +288,6 @@ impl eframe::App for KvmApp {
                 if previous != self.settings.language { self.persist_settings(); }
             });
             let lang = self.settings.language;
-            #[cfg(target_os="macos")]
-            if self.tray.is_none() {
-                ui.colored_label(egui::Color32::YELLOW,tr(lang,
-                    "菜单栏图标启动失败；设置窗口会保持可用。关闭窗口将退出程序。",
-                    "Menu bar icon failed to start. Settings remains usable; closing this window exits the app."));
-            }
             ui.label(tr(lang,
                 "安全的局域网键盘鼠标共享 · Windows ↔ macOS",
                 "Secure LAN keyboard and mouse sharing · Windows ↔ macOS"));
@@ -515,16 +481,14 @@ impl eframe::App for KvmApp {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 730.0])
-            // Always show Settings on launch, including macOS agent apps.
-            // The user can close Settings to continue in the menu bar.
-            // Starting hidden can strand users if the status item is missing
-            // or not noticed, so it must never be the unconditional default.
+            // Normal macOS foreground app, visible in Dock and Cmd+Tab.
+            // Do not rely on a menu-bar icon as the only window entry point.
             .with_visible(true),
         ..Default::default()
     };
     eframe::run_native("kvm",options,
         Box::new(|cc| {
             install_chinese_font(&cc.egui_ctx);
-            Ok(Box::new(KvmApp::new(model::load(), &cc.egui_ctx)))
+            Ok(Box::new(KvmApp::new(model::load())))
         }))
 }

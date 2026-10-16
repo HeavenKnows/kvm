@@ -46,12 +46,6 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Generate branded app icon
-        shell: bash
-        run: |
-          python -m pip install --quiet pillow
-          python scripts/generate_icon.py
-
       - name: Run Rust unit tests
         shell: bash
         run: cargo test --target "${{ matrix.target }}"
@@ -67,14 +61,13 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/kvm.exe" "dist/kvm.exe"
 
-      - name: Bundle macOS menu bar app and DMG
+      - name: Bundle macOS foreground app and DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
           APP="dist/kvm.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          iconutil -c icns "dist/branding/kvm.iconset" -o "$APP/Contents/Resources/kvm.icns"
+          mkdir -p "$APP/Contents/MacOS"
           cp "target/${{ matrix.target }}/release/kvm" "$APP/Contents/MacOS/kvm"
           chmod 755 "$APP/Contents/MacOS/kvm"
           cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -86,17 +79,20 @@ jobs:
             <key>CFBundleDisplayName</key><string>kvm</string>
             <key>CFBundleIdentifier</key><string>dev.heavenknows.kvm</string>
             <key>CFBundleExecutable</key><string>kvm</string>
-            <key>CFBundleIconFile</key><string>kvm.icns</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>2</string>
+            <key>CFBundleVersion</key><string>3</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
-            <key>LSUIElement</key><true/>
+            <key>LSUIElement</key><false/>
             <key>NSHighResolutionCapable</key><true/>
           </dict>
           </plist>
           PLIST
           plutil -lint "$APP/Contents/Info.plist"
+          # Regression guard: this build MUST have a Dock icon and no bundled
+          # branded icon; otherwise users could again lose every GUI entry point.
+          test "$(plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" = false
+          test ! -f "$APP/Contents/Resources/kvm.icns"
           codesign --force --sign - --timestamp=none "$APP"
           # Conventional drag-to-Applications DMG. Finder shows kvm.app
           # alongside a symlink to the system Applications folder.
