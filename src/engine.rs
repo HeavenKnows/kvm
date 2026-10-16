@@ -17,7 +17,7 @@ fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
 }
 
 pub struct Shared {
-    is_receiver:bool,
+    is_receiver:AtomicBool,
     pub status:Mutex<UiStatus>,
     pub layout:Mutex<Layout>,
     pub local_screen:Screen,
@@ -45,7 +45,7 @@ impl Shared {
     pub fn new(s:&Settings)->Arc<Self>{
         let (w,h)=rdev::display_size().unwrap_or((1920,1080));
         Arc::new(Self {
-            is_receiver:s.role_server,
+            is_receiver:AtomicBool::new(s.role_server),
             status:Mutex::new(UiStatus::Idle), layout:Mutex::new(s.layout),
             local_screen:Screen::new(w as i32,h as i32),
             remote_screen:Mutex::new(Screen::new(1920,1080)),
@@ -78,7 +78,7 @@ impl Shared {
     /// User-initiated disconnect; receiver keeps listening for the next client.
     pub fn disconnect_peer(&self){
         let was_remote=self.active.swap(false,Ordering::SeqCst);
-        if was_remote && !self.is_receiver { self.return_cursor(); }
+        if was_remote && !self.is_receiver.load(Ordering::SeqCst) { self.return_cursor(); }
         self.shutdown_peer();
         self.info(UiStatus::UserDisconnected);
     }
@@ -151,6 +151,7 @@ fn paste_hotkey(os:Platform){
 // handled at a time, preserving the existing single-controller design.
 pub fn start_server(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
+    shared.is_receiver.store(true,Ordering::SeqCst);
     shared.stop_requested.store(false,Ordering::SeqCst);
     std::thread::spawn(move || {
         let listener=match TcpListener::bind(("0.0.0.0",s.listen_port)) {
@@ -264,6 +265,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
 
 pub fn start_client(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
+    shared.is_receiver.store(false,Ordering::SeqCst);
     shared.stop_requested.store(false,Ordering::SeqCst);
     std::thread::spawn(move ||{
         let result=client_session(&shared,s);
