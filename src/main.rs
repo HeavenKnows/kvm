@@ -99,6 +99,11 @@ impl KvmApp {
     fn new(mut settings: Settings, ctx: &egui::Context) -> Self {
         if settings.secret.len() != 32 { settings.secret = generate_secret(); }
         let state = engine::Shared::new(&settings);
+        // A menu-bar receiver should actually listen after launch, not wait
+        // invisibly until its Settings window is opened.
+        if settings.role_server && settings.auto_start_receiver {
+            engine::start_server(state.clone(),settings.clone());
+        }
         #[cfg(target_os="macos")]
         let tray = match macos_tray::MacMenuBar::new(ctx, settings.language, state.clone()) {
             Ok(tray) => Some(tray),
@@ -238,6 +243,11 @@ impl eframe::App for KvmApp {
                 });
                 if previous != self.settings.role_server { self.persist_settings(); }
                 if self.settings.role_server {
+                    if ui.checkbox(&mut self.settings.auto_start_receiver,
+                        tr(lang,"应用启动时自动开始接收（下次启动生效）",
+                            "Start listening automatically at app launch (next launch)")).changed(){
+                        self.persist_settings();
+                    }
                     ui.horizontal(|ui| {
                         ui.label(tr(lang,"监听端口","Listening port"));
                         let port_change = ui.add(egui::DragValue::new(&mut self.settings.listen_port)
