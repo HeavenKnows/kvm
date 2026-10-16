@@ -263,13 +263,16 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
 
 pub fn start_client(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
+    shared.stop_requested.store(false,Ordering::SeqCst);
     std::thread::spawn(move ||{
         let result=client_session(&shared,s);
         shared.close();
         // This is deliberately the final step: a retry cannot start while any
         // previous session still owns the sender or consumes incoming messages.
         shared.started.store(false,Ordering::SeqCst);
-        if let Err(status)=result {shared.info(status);}
+        if shared.stop_requested.load(Ordering::SeqCst) {
+            shared.info(UiStatus::UserDisconnected);
+        } else if let Err(status)=result {shared.info(status);}
         else {shared.info(UiStatus::Disconnected);}
     });
 }
@@ -282,8 +285,11 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     let addr:SocketAddr=s.address.parse().map_err(|_|UiStatus::InvalidAddress)?;
     let stream=TcpStream::connect_timeout(&addr,Duration::from_secs(4))
         .map_err(|e|UiStatus::ConnectFailed(e.to_string()))?;
-    let (tx,rx)=wire::connect(stream,&s.secret,true)
+    shared.store_socket(&stream).map_err(|e|UiStatus::ConnectFailed(e.to_string()))?;
+    if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
+    let (tx,rx,_control)=wire::connect(stream,&s.secret,true)
         .map_err(|e|UiStatus::PairingFailed(e.to_string()))?;
+    if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
     *shared.out.lock().unwrap()=Some(tx);
     shared.info(UiStatus::AwaitingInfo);
 
@@ -299,6 +305,7 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
         _=>return Err(UiStatus::InvalidHandshake),
     }
 
+    if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
     let (paste_tx,paste_rx)=mpsc::sync_channel::<()>(16);
     *shared.paste_sender.lock().unwrap()=Some(paste_tx);
     shared.ready.store(true,Ordering::SeqCst);
@@ -322,12 +329,25 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     let motion_shared=shared.clone();
     std::thread::spawn(move ||{
         while motion_shared.ready.load(Ordering::Relaxed){
-            if motion_shared.active.load(Ordering::Relaxed){motion_shared.flush_motion();}
+            if motion_shared.active.load(Ordering::Relaxed){
+                if motion_shared.recenter_requested.swap(false,Ordering::SeqCst){
+                    let center=cursor::warp_anchor(
+                        motion_shared.local_screen.w,motion_shared.local_screen.h);
+                    motion_shared.ignore_warp.store(true,Ordering::SeqCst);
+                    if cursor::warp(center.0,center.1) {
+                        *motion_shared.cursor_last.lock().unwrap()=Some(center);
+                    } else {
+                        motion_shared.ignore_warp.store(false,Ordering::SeqCst);
+                    }
+                }
+                motion_shared.flush_motion();
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
     });
 
     for msg in rx {
+        if shared.stop_requested.load(Ordering::SeqCst){break;}
         match msg {
             Wire::Back=>{
                 shared.active.store(false,Ordering::SeqCst);
