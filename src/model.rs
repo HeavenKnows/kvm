@@ -87,11 +87,17 @@ impl Default for Settings {
 }
 
 pub fn config_path()->Option<std::path::PathBuf> {
-    dirs::config_dir().map(|p|p.join("crosskey").join("settings.json"))
+    dirs::config_dir().map(|p|p.join("kvm").join("settings.json"))
 }
 pub fn load()->Settings {
-    config_path().and_then(|p|std::fs::read(p).ok())
-        .and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or_default()
+    // Keep existing settings for users upgrading from CrossKey: if no kvm config
+    // exists, read the old file and save into the kvm directory on next change.
+    let new_path = config_path();
+    let legacy_path = dirs::config_dir().map(|p|p.join("crosskey").join("settings.json"));
+    new_path.and_then(|p| std::fs::read(p).ok())
+        .or_else(|| legacy_path.and_then(|p| std::fs::read(p).ok()))
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
 }
 pub fn save(s:&Settings){
     if let Some(p)=config_path(){

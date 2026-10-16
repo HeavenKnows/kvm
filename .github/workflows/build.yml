@@ -1,4 +1,4 @@
-name: Build CrossKey (Windows + macOS)
+name: Build kvm (Windows + macOS)
 
 on:
   push:
@@ -18,24 +18,32 @@ jobs:
           - name: Windows x64
             os: windows-2025
             target: x86_64-pc-windows-msvc
-            artifact: crosskey-windows-x64
+            artifact: kvm-windows-x64
           - name: macOS Apple Silicon
             os: macos-15
             target: aarch64-apple-darwin
-            artifact: crosskey-macos-arm64
+            artifact: kvm-macos-arm64
           - name: macOS Intel
             os: macos-15-intel
             target: x86_64-apple-darwin
-            artifact: crosskey-macos-intel
+            artifact: kvm-macos-intel
 
     steps:
+      # checkout@v5 uses Node.js 24 (checkout@v4 uses Node.js 20).
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
+      # Composite shell action: installs Rust, not a Node.js runtime.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Show toolchain versions
+        shell: bash
+        run: |
+          rustc --version
+          cargo --version
 
       - name: Build optimized binary
         shell: bash
@@ -46,21 +54,22 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/crosskey.exe" "dist/crosskey.exe"
-          Compress-Archive -Path "dist/crosskey.exe" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+          Copy-Item "target/${{ matrix.target }}/release/kvm.exe" "dist/kvm.exe"
+          Compress-Archive -Path "dist/kvm.exe" -DestinationPath "${{ matrix.artifact }}.zip" -Force
 
       - name: Package macOS executable
         if: runner.os == 'macOS'
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/crosskey" dist/crosskey
-          chmod +x dist/crosskey
-          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist crosskey
+          cp "target/${{ matrix.target }}/release/kvm" dist/kvm
+          chmod +x dist/kvm
+          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist kvm
 
+      # upload-artifact@v6 runs on Node.js 24 (v4 is not suitable).
       - name: Upload Windows build
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.zip
@@ -68,7 +77,7 @@ jobs:
 
       - name: Upload macOS build
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz

@@ -7,7 +7,7 @@ use eframe::egui;
 use model::{Layout,Screen,Settings,Side};
 use std::{sync::{Arc,atomic::Ordering}, time::Duration};
 
-struct CrossKey {
+struct KvmApp {
     settings:Settings,
     state:Arc<engine::Shared>,
 }
@@ -16,7 +16,7 @@ fn generate_secret()->String {
     let mut buf=[0_u8;16]; rand::thread_rng().fill_bytes(&mut buf);
     buf.iter().map(|b|format!("{b:02x}")).collect()
 }
-impl CrossKey {
+impl KvmApp {
     fn new(mut s:Settings)->Self {
         if s.secret.len()!=32 {s.secret=generate_secret();}
         let state=engine::Shared::new(&s);
@@ -61,10 +61,10 @@ impl CrossKey {
         });
     }
 }
-impl eframe::App for CrossKey {
+impl eframe::App for KvmApp {
     fn update(&mut self, ctx:&egui::Context,_frame:&mut eframe::Frame){
         egui::CentralPanel::default().show(ctx,|ui|{
-            ui.heading("CrossKey 0.3 · Rust");
+            ui.heading("kvm 0.3.1 · Rust");
             ui.label("Windows <-> macOS software KVM · experimental source edition");
             ui.separator();
             let started=self.state.started.load(Ordering::SeqCst);
@@ -118,6 +118,6 @@ impl eframe::App for CrossKey {
 }
 fn main()->eframe::Result<()> {
     // GUI/main thread belongs to the native window run loop; blocking input hooks run separately.
-    eframe::run_native("CrossKey Rust",eframe::NativeOptions::default(),
-        Box::new(|_cc|Ok(Box::new(CrossKey::new(model::load())))))
+    eframe::run_native("kvm",eframe::NativeOptions::default(),
+        Box::new(|_cc|Ok(Box::new(KvmApp::new(model::load())))))
 }
