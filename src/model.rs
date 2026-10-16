@@ -77,7 +77,14 @@ pub fn entering_multi(
         Side::Top=>y<=l.y+2 && y>=l.y && x>=l.x && x<l.x+l.w,
         Side::Bottom=>y>=l.y+l.h-3 && y<l.y+l.h && x>=l.x && x<l.x+l.w,
     };
-    if !at_edge || !r.contains(rx,ry){return None;}
+    if !at_edge{return None;}
+    let (rx,ry)=match layout.side {
+        Side::Right=>(r.x+3,ry),
+        Side::Left=>(r.x+r.w-4,ry),
+        Side::Top=>(rx,r.y+r.h-4),
+        Side::Bottom=>(rx,r.y+3),
+    };
+    if !r.contains(rx,ry){return None;}
     // Do not steal the pointer from a neighboring local monitor. Only an
     // exposed physical edge can switch between computers.
     let (nx,ny)=match layout.side{
