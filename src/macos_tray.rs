@@ -90,7 +90,7 @@ impl MacMenuBar {
 /// (no Dock or Cmd+Tab). Must run on the macOS main thread.
 pub fn activate_app(){
     // objc::msg_send! expands to sel!, which must be explicitly in scope.
-    use objc::sel;
+    use objc::{sel,sel_impl};
     unsafe {
         let cls=objc::class!(NSApplication);
         let app:*mut objc::runtime::Object=objc::msg_send![cls,sharedApplication];
