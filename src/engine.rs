@@ -307,8 +307,9 @@ fn capture(shared:Arc<Shared>) {
     let pos=Arc::new(Mutex::new(None::<(i32,i32)>));
     let p=pressed.clone(); let skip=skip_v.clone(); let skip_emergency=skip_f12.clone(); let last=pos.clone();
     let me=Platform::local();
+    let hook_shared=shared.clone();
     if let Err(e)=rdev::grab(move |event| {
-        if !shared.ready.load(Ordering::Relaxed){
+        if !hook_shared.ready.load(Ordering::Relaxed){
             p.lock().unwrap().clear();
             skip.store(false,Ordering::SeqCst);
             skip_emergency.store(false,Ordering::SeqCst);
@@ -316,33 +317,33 @@ fn capture(shared:Arc<Shared>) {
             return Some(event);
         }
         let et=event.event_type.clone();
-        let remote=shared.active.load(Ordering::Relaxed);
+        let remote=hook_shared.active.load(Ordering::Relaxed);
         match et {
             EventType::KeyPress(k)=>{
                 p.lock().unwrap().insert(k);
                 if k==Key::F12 && remote {
                     skip_emergency.store(true,Ordering::SeqCst);
-                    shared.active.store(false,Ordering::SeqCst);
-                    shared.send(Wire::Back);
-                    shared.return_cursor();
+                    hook_shared.active.store(false,Ordering::SeqCst);
+                    hook_shared.send(Wire::Back);
+                    hook_shared.return_cursor();
                     return None;
                 }
                 let chord=p.lock().unwrap().iter().any(|&v|input::primary(v,me));
                 if chord && (k==Key::KeyC || k==Key::KeyX){
-                    *shared.owner.lock().unwrap()=if remote {Owner::Remote} else {Owner::Local};
+                    *hook_shared.owner.lock().unwrap()=if remote {Owner::Remote} else {Owner::Local};
                 }
                 if k==Key::KeyV && chord {
-                    let owner=*shared.owner.lock().unwrap();
-                    let action=paste_action(remote,owner,shared.clipboard.load(Ordering::Relaxed));
+                    let owner=*hook_shared.owner.lock().unwrap();
+                    let action=paste_action(remote,owner,hook_shared.clipboard.load(Ordering::Relaxed));
                     match action {
                         PasteAction::SendLocalClipboard=>{
                             skip.store(true,Ordering::SeqCst);
-                            if let Some(tx)=shared.paste_sender.lock().unwrap().as_ref(){ let _=tx.try_send(()); }
+                            if let Some(tx)=hook_shared.paste_sender.lock().unwrap().as_ref(){ let _=tx.try_send(()); }
                             return None;
                         }
                         PasteAction::RequestRemoteClipboard=>{
                             skip.store(true,Ordering::SeqCst);
-                            shared.send(Wire::ClipboardRequest);
+                            hook_shared.send(Wire::ClipboardRequest);
                             return None;
                         }
                         PasteAction::Native=>{}
@@ -361,18 +362,18 @@ fn capture(shared:Arc<Shared>) {
                 *previous=Some((x,y));
                 if remote {
                     if delta!=(0,0) {
-                        shared.pending_dx.fetch_add(delta.0.clamp(-200,200),Ordering::Relaxed);
-                        shared.pending_dy.fetch_add(delta.1.clamp(-200,200),Ordering::Relaxed);
+                        hook_shared.pending_dx.fetch_add(delta.0.clamp(-200,200),Ordering::Relaxed);
+                        hook_shared.pending_dy.fetch_add(delta.1.clamp(-200,200),Ordering::Relaxed);
                     }
                     return None;
                 }
-                let layout=*shared.layout.lock().unwrap();
-                let other=*shared.remote_screen.lock().unwrap();
-                if layout.entering(x,y,shared.local_screen,other){
-                    let (rx,ry)=layout.entry(x,y,shared.local_screen,other);
-                    *shared.entry_local.lock().unwrap()=(x,y);
-                    shared.active.store(true,Ordering::SeqCst);
-                    shared.send(Wire::Enter{x:rx,y:ry,side:layout.side});
+                let layout=*hook_shared.layout.lock().unwrap();
+                let other=*hook_shared.remote_screen.lock().unwrap();
+                if layout.entering(x,y,hook_shared.local_screen,other){
+                    let (rx,ry)=layout.entry(x,y,hook_shared.local_screen,other);
+                    *hook_shared.entry_local.lock().unwrap()=(x,y);
+                    hook_shared.active.store(true,Ordering::SeqCst);
+                    hook_shared.send(Wire::Enter{x:rx,y:ry,side:layout.side});
                     return None;
                 }
                 return Some(event);
@@ -380,13 +381,13 @@ fn capture(shared:Arc<Shared>) {
             _=>{}
         }
         if remote {
-            let target=*shared.target.lock().unwrap();
+            let target=*hook_shared.target.lock().unwrap();
             let mapped=match et {
-                EventType::KeyPress(k)=>EventType::KeyPress(input::remap(k,me,target,shared.remap.load(Ordering::Relaxed))),
-                EventType::KeyRelease(k)=>EventType::KeyRelease(input::remap(k,me,target,shared.remap.load(Ordering::Relaxed))),
+                EventType::KeyPress(k)=>EventType::KeyPress(input::remap(k,me,target,hook_shared.remap.load(Ordering::Relaxed))),
+                EventType::KeyRelease(k)=>EventType::KeyRelease(input::remap(k,me,target,hook_shared.remap.load(Ordering::Relaxed))),
                 x=>x,
             };
-            shared.send(Wire::Input(mapped));
+            hook_shared.send(Wire::Input(mapped));
             None
         }else{Some(event)}
     }){
