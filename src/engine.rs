@@ -751,14 +751,14 @@ fn capture(shared:Arc<Shared>) {
                     // Suppress local movement while controlling the peer.
                     return None;
                 }
-                let (x,y)=(x as i32-hook_shared.virtual_origin()().0,
-                            y as i32-hook_shared.virtual_origin()().1);
+                let (x,y)=(x as i32-hook_shared.virtual_origin().0,
+                            y as i32-hook_shared.virtual_origin().1);
                 let layout=*hook_shared.layout.lock().unwrap();
                 let remote=hook_shared.remote_displays.lock().unwrap();
                 let local_idx=hook_shared.local_display_index.load(Ordering::Relaxed);
                 let remote_idx=hook_shared.remote_display_index.load(Ordering::Relaxed);
                 let entry=model::entering_multi(layout,x,y,
-                    &hook_shared.local_displays()(),&remote,local_idx,remote_idx);
+                    &hook_shared.local_displays(),&remote,local_idx,remote_idx);
                 drop(remote);
                 if !hook_shared.pending_enter.load(Ordering::Relaxed){
                     if let Some((rx,ry))=entry{
