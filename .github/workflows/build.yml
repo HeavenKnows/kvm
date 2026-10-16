@@ -61,7 +61,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/kvm.exe" "dist/kvm.exe"
 
-      - name: Bundle macOS foreground app and DMG
+      - name: Bundle macOS menu bar app and DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
@@ -81,17 +81,17 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>3</string>
+            <key>CFBundleVersion</key><string>4</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
-            <key>LSUIElement</key><false/>
+            <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
           </dict>
           </plist>
           PLIST
           plutil -lint "$APP/Contents/Info.plist"
-          # Regression guard: this build MUST have a Dock icon and no bundled
-          # branded icon; otherwise users could again lose every GUI entry point.
-          test "$(plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" = false
+          # Agent mode: no Dock icon; accessible status bar and startup
+          # Settings UI are restored in src/macos_tray.rs / src/main.rs.
+          test "$(plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" = true
           test ! -f "$APP/Contents/Resources/kvm.icns"
           codesign --force --sign - --timestamp=none "$APP"
           # Conventional drag-to-Applications DMG. Finder shows kvm.app
