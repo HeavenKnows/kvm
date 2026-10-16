@@ -9,14 +9,40 @@ mod network;
 mod native_motion;
 mod native_cursor;
 mod display;
+#[cfg(target_os="macos")]
+mod macos_tray;
 
 use eframe::egui;
 use model::{Language, Layout, Settings, Side};
 use std::{
     net::{Ipv4Addr, TcpListener},
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
+    sync::{Arc, atomic::Ordering, mpsc::{self,Receiver,TryRecvError}},
+    time::{Duration,Instant},
 };
+
+// Startup breadcrumbs are free of IP addresses, secrets, and keystrokes.
+#[cfg(target_os="macos")]
+fn launch_mark(stage:&str){
+    use std::io::Write;
+    if let Ok(mut f)=std::fs::OpenOptions::new().create(true).append(true)
+        .open(std::env::temp_dir().join("kvm-launch.log")){
+        let _=writeln!(f,"{} pid={} {}",std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            std::process::id(),stage);
+    }
+}
+#[cfg(not(target_os="macos"))]
+fn launch_mark(_stage:&str){}
+
+fn install_chinese_font_async(ctx:&egui::Context){
+    let ctx=ctx.clone();
+    std::thread::spawn(move ||{
+        launch_mark("font-load-start");
+        install_chinese_font(&ctx);
+        launch_mark("font-load-done");
+        ctx.request_repaint();
+    });
+}
 
 fn tr(lang: Language, zh: &'static str, en: &'static str) -> &'static str {
     if lang == Language::Zh { zh } else { en }
@@ -94,19 +120,52 @@ struct KvmApp {
     ips: Vec<Ipv4Addr>,
     drag_start_layout: Option<Layout>,
     drag_start_group:Option<(i32,i32)>,
+    display_rx:Option<Receiver<display::Desktop>>,
+    ip_rx:Option<Receiver<Vec<Ipv4Addr>>>,
+    startup_at:Instant,
+    display_loaded:bool,
+    display_slow:bool,
+    auto_start_waiting:bool,
+    #[cfg(target_os="macos")]
+    tray:Option<macos_tray::MacMenuBar>,
+    #[cfg(target_os="macos")]
+    tray_attempted:bool,
+    frames:u32,
 }
 impl KvmApp {
     fn new(mut settings: Settings) -> Self {
         if settings.secret.len() != 32 { settings.secret = generate_secret(); }
-        let state = engine::Shared::new(&settings);
-        // A menu-bar receiver should actually listen after launch, not wait
-        // invisibly until its Settings window is opened.
-        if settings.role_server && settings.auto_start_receiver {
-            engine::start_server(state.clone(),settings.clone());
-        }
-        Self { settings, state, ips: network::local_ipv4_addresses(),
-            drag_start_layout:None,
-            drag_start_group:None,
+        // Nonblocking initialization: do not call the OS display enumeration
+        // or interface scanner from the eframe app-creation callback.
+        launch_mark("shared-start");
+        let state=engine::Shared::new(&settings);
+        launch_mark("shared-ready");
+        let (display_tx,display_rx)=mpsc::channel();
+        std::thread::spawn(move ||{
+            launch_mark("display-query-start");
+            let d=display::current();
+            launch_mark("display-query-done");
+            let _=display_tx.send(d);
+        });
+        let (ip_tx,ip_rx)=mpsc::channel();
+        std::thread::spawn(move ||{
+            launch_mark("network-scan-start");
+            let ips=network::local_ipv4_addresses();
+            launch_mark("network-scan-done");
+            let _=ip_tx.send(ips);
+        });
+        let auto_start_waiting=settings.role_server && settings.auto_start_receiver;
+        Self{
+            settings,state,ips:Vec::new(),
+            drag_start_layout:None,drag_start_group:None,
+            display_rx:Some(display_rx),ip_rx:Some(ip_rx),
+            startup_at:Instant::now(),display_loaded:false,display_slow:false,
+            auto_start_waiting,
+            #[cfg(target_os="macos")]
+            tray:None,
+            #[cfg(target_os="macos")]
+            tray_attempted:false,
+            frames:0,
         }
     }
     fn persist_settings(&self) { model::save(&self.settings); }
