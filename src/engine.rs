@@ -1,4 +1,4 @@
-use crate::{input, model::{Layout,Platform,Screen,Settings}, wire::{self,Wire}};
+use crate::{input, model::{Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
 use std::{collections::HashSet,net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::Duration};
 const MAX_TEXT:usize=32*1024;
@@ -17,7 +17,7 @@ fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
 }
 
 pub struct Shared {
-    pub status:Mutex<String>,
+    pub status:Mutex<UiStatus>,
     pub layout:Mutex<Layout>,
     pub local_screen:Screen,
     pub remote_screen:Mutex<Screen>,
@@ -37,7 +37,7 @@ impl Shared {
     pub fn new(s:&Settings)->Arc<Self>{
         let (w,h)=rdev::display_size().unwrap_or((1920,1080));
         Arc::new(Self {
-            status:Mutex::new("未连接".into()), layout:Mutex::new(s.layout),
+            status:Mutex::new(UiStatus::Idle), layout:Mutex::new(s.layout),
             local_screen:Screen::new(w as i32,h as i32),
             remote_screen:Mutex::new(Screen::new(1920,1080)),
             target:Mutex::new(Platform::Mac),active:AtomicBool::new(false),
@@ -48,7 +48,7 @@ impl Shared {
             entry_local:Mutex::new((w as i32/2,h as i32/2)),out:Mutex::new(None),
         })
     }
-    pub fn info(&self,s:&str){*self.status.lock().unwrap()=s.into();}
+    pub fn info(&self,status:UiStatus){*self.status.lock().unwrap()=status;}
     fn flush_motion(&self){
         let dx=self.pending_dx.swap(0,Ordering::Relaxed);
         let dy=self.pending_dy.swap(0,Ordering::Relaxed);
@@ -56,7 +56,7 @@ impl Shared {
         if let Some(tx)=self.out.lock().unwrap().as_ref(){
             if tx.try_send(Wire::MoveBy{dx,dy}).is_err(){
                 self.active.store(false,Ordering::SeqCst);
-                self.info("鼠标队列拥塞，已停止跨机控制");
+                self.info(UiStatus::MotionOverflow);
             }
         }
     }
@@ -66,7 +66,7 @@ impl Shared {
         if let Some(tx)=self.out.lock().unwrap().as_ref(){
             if tx.try_send(msg).is_err(){
                 self.active.store(false,Ordering::SeqCst);
-                self.info("发送队列拥塞；已停止跨机控制，请重新连接");
+                self.info(UiStatus::QueueOverflow);
             }
         }
     }
@@ -106,18 +106,18 @@ fn paste_hotkey(os:Platform){
 pub fn start_server(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
     std::thread::spawn(move ||{
-        let listener=match TcpListener::bind(("0.0.0.0",wire::PORT)) {
-            Ok(x)=>x,Err(e)=>{shared.info(&format!("监听失败: {e}"));return;}
+        let listener=match TcpListener::bind(("0.0.0.0",s.listen_port)) {
+            Ok(x)=>x,Err(e)=>{shared.info(UiStatus::BindFailed(e.to_string())); shared.started.store(false,Ordering::SeqCst); return;}
         };
-        shared.info("等待另一台电脑连接…");
-        let (stream,peer)=match listener.accept(){Ok(x)=>x,Err(e)=>{shared.info(&format!("连接失败: {e}"));return;}};
-        shared.info(&format!("正在验证 {peer}…"));
+        shared.info(UiStatus::Waiting);
+        let (stream,peer)=match listener.accept(){Ok(x)=>x,Err(e)=>{shared.info(UiStatus::AcceptFailed(e.to_string())); shared.started.store(false,Ordering::SeqCst); return;}};
+        shared.info(UiStatus::Authenticating(peer.to_string()));
         let (tx,rx)=match wire::connect(stream,&s.secret,false){
-            Ok(x)=>x,Err(e)=>{shared.info(&format!("配对失败: {e}"));return;}
+            Ok(x)=>x,Err(e)=>{shared.info(UiStatus::PairingFailed(e.to_string())); shared.started.store(false,Ordering::SeqCst); return;}
         };
         *shared.out.lock().unwrap()=Some(tx.clone());
         shared.ready.store(true,Ordering::SeqCst);
-        shared.info(&format!("已连接 {peer}"));
+        shared.info(UiStatus::ConnectedPeer(peer.to_string()));
         shared.send(Wire::Hello{os:Platform::local(),screen:shared.local_screen});
         let watch=shared.clone();
         let armed=Arc::new(AtomicBool::new(false));
@@ -182,31 +182,31 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
         }
         for k in pressed {simulate(EventType::KeyRelease(k));}
         for b in buttons {simulate(EventType::ButtonRelease(b));}
-        shared.close(); shared.info("连接已断开；请重启程序重新连接");
+        shared.close(); shared.info(UiStatus::Disconnected);
     });
 }
 
 pub fn start_client(shared:Arc<Shared>,s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
     std::thread::spawn(move ||{
-        shared.info("正在连接…");
+        shared.info(UiStatus::Connecting);
         let stream=match TcpStream::connect_timeout(&match s.address.parse(){
-            Ok(a)=>a,Err(_)=>{shared.info("地址格式应为 IP:24881");return;}
+            Ok(a)=>a,Err(_)=>{shared.info(UiStatus::InvalidAddress); shared.started.store(false,Ordering::SeqCst); return;}
         },Duration::from_secs(4)){
-            Ok(s)=>s,Err(e)=>{shared.info(&format!("网络连接失败: {e}"));return;}
+            Ok(s)=>s,Err(e)=>{shared.info(UiStatus::ConnectFailed(e.to_string())); shared.started.store(false,Ordering::SeqCst); return;}
         };
         let (tx,rx)=match wire::connect(stream,&s.secret,true){
-            Ok(x)=>x,Err(e)=>{shared.info(&format!("配对失败: {e}"));return;}
+            Ok(x)=>x,Err(e)=>{shared.info(UiStatus::PairingFailed(e.to_string())); shared.started.store(false,Ordering::SeqCst); return;}
         };
         *shared.out.lock().unwrap()=Some(tx);
-        shared.info("等待接收端信息…");
+        shared.info(UiStatus::AwaitingInfo);
         // Clipboard IO stays off the global input hook thread.
         let (paste_tx,paste_rx)=mpsc::sync_channel::<()>(16);
         let work_shared=shared.clone();
         std::thread::spawn(move ||{
             while paste_rx.recv().is_ok(){
                 if let Some(text)=clipboard_get(){work_shared.send(Wire::PasteRemote(text));}
-                else {work_shared.info("本机剪贴板不是文本或超出 32 KiB，已取消远程粘贴");}
+                else {work_shared.info(UiStatus::ClipboardUnavailable);}
             }
         });
         let input_shared=shared.clone();
@@ -224,12 +224,12 @@ pub fn start_client(shared:Arc<Shared>,s:Settings){
                     *shared.target.lock().unwrap()=os;
                     *shared.remote_screen.lock().unwrap()=screen;
                     shared.ready.store(true,Ordering::SeqCst);
-                    shared.info("已连接；将鼠标推到设置的屏幕边缘即可跨屏（F12 返回）");
+                    shared.info(UiStatus::Ready);
                 }
                 Wire::Back=>{
                     shared.active.store(false,Ordering::SeqCst);
                     shared.return_cursor();
-                    shared.info("已返回本机");
+                    shared.info(UiStatus::Returned);
                 }
                 Wire::ClipboardReply(Some(text))=>{
                     // The physical Ctrl/Cmd key may already have been released by now.
@@ -237,13 +237,13 @@ pub fn start_client(shared:Arc<Shared>,s:Settings){
                     if clipboard_set(&text){
                         *shared.owner.lock().unwrap()=Owner::Local;
                         paste_hotkey(Platform::local());
-                    }else{shared.info("收到的剪贴板文本无效或超限");}
+                    }else{shared.info(UiStatus::ClipboardInvalid);}
                 }
-                Wire::ClipboardReply(None)=>shared.info("远端剪贴板没有可用纯文本"),
+                Wire::ClipboardReply(None)=>shared.info(UiStatus::ClipboardRemoteEmpty),
                 _=>{}
             }
         }
-        shared.close(); shared.info("连接断开，本机输入已恢复；请重启应用后重连");
+        shared.close(); shared.info(UiStatus::Disconnected);
     });
 }
 
