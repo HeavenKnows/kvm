@@ -198,3 +198,16 @@ mod platform {
         Ok(())
     }
 }
+
+#[cfg(all(test, target_os="windows"))]
+mod tests {
+    use super::*;
+
+    // Windows CI smoke test: compilation alone cannot reveal failed window-class
+    // registration, wrong FFI struct layout, or RegisterRawInputDevices errors.
+    #[test]
+    fn raw_input_registration_works() {
+        let shared=crate::engine::Shared::new(&crate::model::Settings::default());
+        start(shared).expect("Windows raw mouse listener should initialize");
+    }
+}
