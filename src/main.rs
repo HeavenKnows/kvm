@@ -249,6 +249,7 @@ impl eframe::App for KvmApp {
             }
         }
         egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading(format!("kvm {}", env!("CARGO_PKG_VERSION")));
                 ui.separator();
@@ -416,6 +417,7 @@ impl eframe::App for KvmApp {
             ui.small(tr(lang,
                 "当前支持一台控制端和一台接收端；不支持自动发现；请仅在可信局域网使用。",
                 "One controller + one receiver; no automatic discovery; trusted LAN only."));
+            });
         });
         ctx.request_repaint_after(Duration::from_millis(200));
     }
