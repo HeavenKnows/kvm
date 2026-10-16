@@ -26,9 +26,10 @@ fn launch_mark(stage:&str){
     use std::io::Write;
     if let Ok(mut f)=std::fs::OpenOptions::new().create(true).append(true)
         .open(std::env::temp_dir().join("kvm-launch.log")){
-        let _=writeln!(f,"{} pid={} {}",std::time::SystemTime::now()
+        let entry=format!("{} pid={} {}\n",std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
             std::process::id(),stage);
+        let _=f.write_all(entry.as_bytes());
     }
 }
 #[cfg(not(target_os="macos"))]
@@ -329,6 +330,7 @@ impl eframe::App for KvmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames=self.frames.saturating_add(1);
         if self.frames==1{launch_mark("first-ui-frame");}
+        if self.frames>=3 {
         if let Some(rx)=&self.display_rx{
             match rx.try_recv(){
                 Ok(desktop)=>{
@@ -353,6 +355,7 @@ impl eframe::App for KvmApp {
                     launch_mark("display-worker-disconnected");
                 }
             }
+        }
         }
         if let Some(rx)=&self.ip_rx{
             match rx.try_recv(){
