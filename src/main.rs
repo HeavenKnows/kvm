@@ -35,14 +35,39 @@ fn launch_mark(stage:&str){
 #[cfg(not(target_os="macos"))]
 fn launch_mark(_stage:&str){}
 
-// set_fonts must not race with the GUI's first layout/paint pass.
-// The macOS system-font override is temporarily disabled while diagnosing
-// startup hangs. The default egui font stack remains available.
+// The macOS worker ONLY reads font bytes. set_fonts must run on the GUI
+// thread after the first complete settings frame, never on the worker.
 fn install_initial_fonts(ctx:&egui::Context){
     #[cfg(not(target_os="macos"))]
     install_chinese_font(ctx);
     #[cfg(target_os="macos")]
-    {let _=ctx;launch_mark("macos-system-font-override-disabled");}
+    {let _=ctx;launch_mark("macos-cjk-font-worker-enabled");}
+}
+fn font_definitions_with_cjk(data:Vec<u8>)->egui::FontDefinitions{
+    let mut fonts=egui::FontDefinitions::default();
+    fonts.font_data.insert("system-cjk".into(),
+        egui::FontData::from_owned(data).into());
+    for family in [egui::FontFamily::Proportional,egui::FontFamily::Monospace]{
+        fonts.families.entry(family).or_default().insert(0,"system-cjk".into());
+    }
+    fonts
+}
+#[cfg(target_os="macos")]
+fn load_system_cjk_font()->Option<(&'static str,Vec<u8>)>{
+    // Try the OS-provided CJK faces; none are bundled or distributed.
+    const PATHS:&[&str]=&[
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ];
+    PATHS.iter().copied().find_map(|path|{
+        let len=std::fs::metadata(path).ok()?.len();
+        if len==0 || len>90*1024*1024{return None;}
+        let bytes=std::fs::read(path).ok()?;
+        if bytes.is_empty(){None}else{Some((path,bytes))}
+    })
 }
 
 fn tr(lang: Language, zh: &'static str, en: &'static str) -> &'static str {
@@ -132,6 +157,12 @@ struct KvmApp {
     #[cfg(target_os="macos")]
     tray_attempted:bool,
     frames:u32,
+    #[cfg(target_os="macos")]
+    font_rx:Option<Receiver<Option<(&'static str,Vec<u8>)>>>,
+    #[cfg(target_os="macos")]
+    font_failed:bool,
+    #[cfg(target_os="macos")]
+    font_ready:bool,
 }
 impl KvmApp {
     fn new(mut settings: Settings) -> Self {
@@ -156,6 +187,17 @@ impl KvmApp {
             let _=ip_tx.send(ips);
         });
         let auto_start_waiting=settings.role_server && settings.auto_start_receiver;
+        #[cfg(target_os="macos")]
+        let font_rx={
+            let (tx,rx)=mpsc::channel();
+            std::thread::spawn(move||{
+                launch_mark("font-byte-read-start");
+                let font=load_system_cjk_font();
+                launch_mark(if font.is_some(){"font-byte-read-done"}else{"font-byte-read-missing"});
+                let _=tx.send(font);
+            });
+            Some(rx)
+        };
         Self{
             settings,state,ips:Vec::new(),
             drag_start_layout:None,drag_start_group:None,
@@ -167,6 +209,12 @@ impl KvmApp {
             #[cfg(target_os="macos")]
             tray_attempted:false,
             frames:0,
+            #[cfg(target_os="macos")]
+            font_rx,
+            #[cfg(target_os="macos")]
+            font_failed:false,
+            #[cfg(target_os="macos")]
+            font_ready:false,
         }
     }
     fn persist_settings(&self) { model::save(&self.settings); }
@@ -339,6 +387,25 @@ impl eframe::App for KvmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames=self.frames.saturating_add(1);
         if self.frames==1{launch_mark("first-ui-frame");}
+        #[cfg(target_os="macos")]
+        if self.frames>=6 {
+            if let Some(rx)=self.font_rx.take(){
+                match rx.try_recv(){
+                    Ok(Some((path,bytes)))=>{
+                        launch_mark("font-install-on-gui-start");
+                        ctx.set_fonts(font_definitions_with_cjk(bytes));
+                        self.font_ready=true;
+                        launch_mark(&format!("font-install-on-gui-done: {path}"));
+                        ctx.request_repaint();
+                    }
+                    Ok(None)|Err(TryRecvError::Disconnected)=>{
+                        self.font_failed=true;
+                        launch_mark("font-install-failed-no-system-cjk-font");
+                    }
+                    Err(TryRecvError::Empty)=>{self.font_rx=Some(rx);}
+                }
+            }
+        }
         if self.frames>=3 {
         if let Some(rx)=&self.display_rx{
             match rx.try_recv(){
@@ -689,6 +756,20 @@ fn main() -> eframe::Result<()> {
 /// Exercise the actual egui multi-monitor editor, not just geometry helpers.
 /// Before the one-snapshot fix, it tried to lock remote_screen a second time
 /// inside the same let expression and blocked the test thread indefinitely.
+#[cfg(test)]
+mod cjk_font_tests{
+    use super::*;
+    #[test]
+    fn cjk_font_precedes_default_fallbacks(){
+        let fonts=font_definitions_with_cjk(vec![0,1,2,3]);
+        assert!(fonts.font_data.contains_key("system-cjk"));
+        for family in [egui::FontFamily::Proportional,egui::FontFamily::Monospace]{
+            assert_eq!(fonts.families.get(&family).and_then(|names|names.first()).map(String::as_str),
+                Some("system-cjk"));
+        }
+    }
+}
+
 #[cfg(test)]
 mod ui_deadlock_tests {
     use super::*;
