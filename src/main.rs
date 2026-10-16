@@ -208,7 +208,7 @@ impl eframe::App for KvmApp {
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("kvm 0.3.2");
+                ui.heading(format!("kvm {}", env!("CARGO_PKG_VERSION")));
                 ui.separator();
                 ui.label("Language / 语言");
                 let selected = if self.settings.language == Language::Zh { "中文" } else { "English" };
