@@ -89,6 +89,8 @@ impl MacMenuBar {
 /// Make the settings window visible when running as an LSUIElement accessory
 /// (no Dock or Cmd+Tab). Must run on the macOS main thread.
 pub fn activate_app(){
+    // objc::msg_send! expands to sel!, which must be explicitly in scope.
+    use objc::sel;
     unsafe {
         let cls=objc::class!(NSApplication);
         let app:*mut objc::runtime::Object=objc::msg_send![cls,sharedApplication];
