@@ -295,7 +295,10 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     shared.info(UiStatus::Connecting);
     let addr:SocketAddr=s.address.parse().map_err(|_|UiStatus::InvalidAddress)?;
     let stream=TcpStream::connect_timeout(&addr,Duration::from_secs(4))
-        .map_err(|e|UiStatus::ConnectFailed(e.to_string()))?;
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::ConnectionRefused=>UiStatus::ConnectRefused(s.address.clone()),
+            _=>UiStatus::ConnectFailed(e.to_string()),
+        })?;
     shared.store_socket(&stream).map_err(|e|UiStatus::ConnectFailed(e.to_string()))?;
     if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
     let (tx,rx,_control)=wire::connect(stream,&s.secret,true)
@@ -317,6 +320,7 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     }
 
     if shared.stop_requested.load(Ordering::SeqCst){return Err(UiStatus::UserDisconnected);}
+    shared.info(UiStatus::NativeInputStarting);
     // Install OS-native mouse capture first, before activating the input grab.
     // Keep a single background listener across reconnects.
     if !shared.native_started.swap(true,Ordering::SeqCst){
