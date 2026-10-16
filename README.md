@@ -229,3 +229,11 @@ macOS 注入鼠标点击前会检查 `AXIsProcessTrusted()`，若尚未授权会
 - macOS GUI 第一帧只绘制简化启动界面，主动请求下一帧；第二帧才创建顶部菜单栏图标，第三帧再应用异步获得的多显示器拓扑，第四帧才绘制完整设置界面。每个阶段在启动日志中留有标记。
 - 启动日志写入 `$TMPDIR/kvm-launch.log`，新增 `minimal-first-frame-enter/return`、`tray-create-start/done`、`display-topology-apply-start/done`、`full-ui-start/returned`，可诊断是否是字体、多显示器或者完整 UI 卡住。
 - 顶部菜单栏常驻、`LSUIElement=true`（不显示 Dock）仍保留。只打包 Windows x64 和 macOS Apple Silicon。**CI 不具备真实 MacBook 外接屏幕 GUI 的验收能力**。
+
+## 0.5.0-beta.6 首次完整设置界面死锁修复
+
+- Mac 实机日志显示 `minimal-first-frame-return`、`tray-create-done`、`display-topology-apply-done` 全部完成，唯独在 `full-ui-start` 后卡住。这与界面中多屏布局缩放的 **同一 `remote_screen` Mutex 在一条链式表达式中被获取两次** 一致：第一处锁的临时守卫延长到表达式结束，第二处调用永久等待。
+- 修复为进入布局计算前仅获取一次远端屏幕快照，之后的宽高计算全部使用普通整数值，不在 UI 表达式里重复获取锁。
+- 加入完整 egui 控制端屏幕布局的超时回归测试 `controller_layout_first_full_frame_completes`，防止只验证纯几何函数却遗漏 UI 死锁。
+- 首次完整界面增加 `full-ui-header-returned`、`full-ui-inputs-returned`、`full-ui-layout-enter/returned`、`full-ui-status-enter`、`full-ui-content-returned` 等诊断标记。如果还有问题，应以日志最后一条标记为依据，不再怀疑菜单栏或显示器枚举。
+- 保持无 Dock、顶部菜单栏图标，仍只构建 Windows x64 和 Mac Apple Silicon。Mac 定制中文字体暂不恢复，待启动与多屏功能稳定后另行验证。

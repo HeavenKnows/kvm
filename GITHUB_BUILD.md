@@ -61,3 +61,7 @@ cargo build --release
 ### 0.5.0-beta.4：macOS 菜单栏与外接显示器稳定性
 
 Mac App 恢复 `LSUIElement=true`（没有 Dock 图标），但首次启动仍显示设置窗口。顶部状态栏的 kvm 图标支持「打开设置」「断开当前连接」「退出 kvm」。启动阶段的显示器查询/字体加载/网络枚举已移出 GUI 线程；如果 MacBook 接外屏后应用无响应，可查看 `/tmp/kvm-launch.log`，定位卡在何处。正式品牌 App 图标依然暂停嵌入，以减少权限和签名变量。
+
+### 0.5.0-beta.6：Mac 完整界面死锁
+
+已修复 `remote_screen` 的重复上锁导致 Mac 控制端首次绘制多显示器布局页面时无响应；新增 headless egui UI 回归测试和更细的启动日志。顶部状态栏模式保持不变。
