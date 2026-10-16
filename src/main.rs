@@ -22,7 +22,7 @@ impl KvmApp {
         let state=engine::Shared::new(&s);
         Self{settings:s,state}
     }
-    fn save(&self){model::save(&self.settings);}
+    fn persist_settings(&self){model::save(&self.settings);}
     fn layout_ui(&mut self, ui:&mut egui::Ui) {
         ui.label("Drag the blue screen to change layout (L / R / Top / Bottom)");
         let (rect,_) = ui.allocate_exact_size(egui::vec2(ui.available_width().min(530.0),285.0),egui::Sense::hover());
@@ -49,14 +49,14 @@ impl KvmApp {
             self.settings.layout=Layout{side,offset}.clamp(local,remote);
             *self.state.layout.lock().unwrap()=self.settings.layout;
         }
-        if response.drag_stopped(){self.save();}
+        if response.drag_stopped(){self.persist_settings();}
         ui.horizontal(|ui|{
             ui.label(format!("Side: {:?}",self.settings.layout.side));
             ui.label(format!("Offset: {} px",self.settings.layout.offset));
             if ui.button("Reset layout").clicked(){
                 self.settings.layout=Layout::default();
                 *self.state.layout.lock().unwrap()=self.settings.layout;
-                self.save();
+                self.persist_settings();
             }
         });
     }
@@ -93,10 +93,10 @@ impl eframe::App for KvmApp {
                 }
             });
             if ui.checkbox(&mut self.settings.remap,"Translate Ctrl (Windows) <-> Command (Mac)").changed(){
-                self.state.remap.store(self.settings.remap,Ordering::SeqCst); self.save();
+                self.state.remap.store(self.settings.remap,Ordering::SeqCst); self.persist_settings();
             }
             if ui.checkbox(&mut self.settings.clipboard,"Clipboard on demand at paste (text only)").changed(){
-                self.state.clipboard.store(self.settings.clipboard,Ordering::SeqCst); self.save();
+                self.state.clipboard.store(self.settings.clipboard,Ordering::SeqCst); self.persist_settings();
             }
             ui.separator();
             if !self.settings.role_server {self.layout_ui(ui);} else {
@@ -104,7 +104,7 @@ impl eframe::App for KvmApp {
             }
             ui.separator();
             if ui.add_enabled(!started,egui::Button::new(if self.settings.role_server{"Start receiver"}else{"Connect and share"})).clicked(){
-                self.save();
+                self.persist_settings();
                 if self.settings.role_server {engine::start_server(self.state.clone(),self.settings.clone());}
                 else {engine::start_client(self.state.clone(),self.settings.clone());}
             }
