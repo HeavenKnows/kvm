@@ -7,6 +7,7 @@ mod engine;
 mod status;
 mod network;
 mod native_motion;
+mod native_cursor;
 #[cfg(target_os="macos")]
 mod macos_tray;
 
@@ -92,6 +93,7 @@ struct KvmApp {
     settings: Settings,
     state: Arc<engine::Shared>,
     ips: Vec<Ipv4Addr>,
+    drag_start_layout: Option<Layout>,
     #[cfg(target_os="macos")]
     tray: Option<macos_tray::MacMenuBar>,
 }
@@ -116,6 +118,7 @@ impl KvmApp {
             }
         };
         Self { settings, state, ips: network::local_ipv4_addresses(),
+            drag_start_layout:None,
             #[cfg(target_os="macos")]
             tray,
         }
@@ -149,52 +152,86 @@ impl KvmApp {
     }
 
     fn layout_ui(&mut self, ui: &mut egui::Ui, lang: Language) {
-        ui.label(tr(lang,
-            "拖动蓝色屏幕来调整另一台电脑的位置（支持上下左右及错位）",
-            "Drag the blue screen to position the other computer (including offsets)."));
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width().min(530.0), 265.0), egui::Sense::hover());
-        let local = self.state.local_screen;
-        let remote = *self.state.remote_screen.lock().unwrap();
-        let scale = (135.0 / local.h.max(remote.h) as f32).min(0.14);
-        let base = egui::Rect::from_center_size(rect.center(),
-            egui::vec2(local.w as f32 * scale, local.h as f32 * scale));
-        let (ox, oy) = self.settings.layout.origin(local, remote);
-        let peer = egui::Rect::from_min_size(
-            base.min + egui::vec2(ox as f32 * scale, oy as f32 * scale),
-            egui::vec2(remote.w as f32 * scale, remote.h as f32 * scale));
-        let painter = ui.painter();
-        painter.rect_filled(base, 7.0, egui::Color32::from_rgb(95,104,119));
-        painter.text(base.center(), egui::Align2::CENTER_CENTER,
-            tr(lang,"本机","This PC"), egui::FontId::proportional(14.0), egui::Color32::WHITE);
-        painter.rect_filled(peer, 7.0, egui::Color32::from_rgb(49,118,216));
-        painter.text(peer.center(), egui::Align2::CENTER_CENTER,
-            tr(lang,"另一台电脑","Other PC"), egui::FontId::proportional(14.0), egui::Color32::WHITE);
-        let response = ui.interact(peer, ui.id().with("peer-drag"), egui::Sense::drag());
-        if response.dragged() {
-            let center = peer.center() + response.drag_delta();
-            let diff = center - base.center();
-            let side = if diff.x.abs() > diff.y.abs() {
-                if diff.x >= 0.0 { Side::Right } else { Side::Left }
-            } else if diff.y >= 0.0 { Side::Bottom } else { Side::Top };
-            let offset = if matches!(side,Side::Left | Side::Right) {
-                ((center.y - base.min.y - peer.height() / 2.0) / scale).round() as i32
-            } else {
-                ((center.x - base.min.x - peer.width() / 2.0) / scale).round() as i32
+        ui.label(tr(lang,"拖动蓝色屏幕调整位置，或用方向按钮直接设置上下左右。",
+            "Drag the blue screen, or use the four direction buttons below."));
+        let local=self.state.local_screen;
+        let remote=*self.state.remote_screen.lock().unwrap();
+        let (rect,_) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().min(560.0),315.0),egui::Sense::hover());
+        // Leave space for peer on all four sides, not just to the right.
+        let scale=(rect.width()/(3.3*local.w.max(remote.w) as f32))
+            .min(rect.height()/(3.4*local.h.max(remote.h) as f32))
+            .min(0.15);
+        let base=egui::Rect::from_center_size(rect.center(),
+            egui::vec2(local.w as f32*scale,local.h as f32*scale));
+        let (ox,oy)=self.settings.layout.origin(local,remote);
+        let peer=egui::Rect::from_min_size(
+            base.min+egui::vec2(ox as f32*scale,oy as f32*scale),
+            egui::vec2(remote.w as f32*scale,remote.h as f32*scale));
+        let painter=ui.painter();
+        painter.rect_filled(base,7.0,egui::Color32::from_rgb(95,104,119));
+        painter.text(base.center(),egui::Align2::CENTER_CENTER,
+            tr(lang,"本机","This PC"),egui::FontId::proportional(14.0),egui::Color32::WHITE);
+        painter.rect_filled(peer,7.0,egui::Color32::from_rgb(49,118,216));
+        painter.text(peer.center(),egui::Align2::CENTER_CENTER,
+            tr(lang,"另一台电脑","Other PC"),egui::FontId::proportional(14.0),egui::Color32::WHITE);
+        let response=ui.interact(peer,ui.id().with("peer-drag"),egui::Sense::drag());
+        if response.drag_started(){self.drag_start_layout=Some(self.settings.layout);}
+        if response.dragged(){
+            // drag_delta is cumulative from gesture START. Do not apply it
+            // repeatedly to last frame's already-updated peer position.
+            let original=self.drag_start_layout.unwrap_or(self.settings.layout);
+            let (ix,iy)=original.origin(local,remote);
+            let original_center=base.min
+                +egui::vec2(ix as f32*scale,iy as f32*scale)
+                +egui::vec2(remote.w as f32*scale,remote.h as f32*scale)*0.5;
+            let center=original_center+response.drag_delta();
+            let diff=center-base.center();
+            let side=if diff.x.abs()>diff.y.abs(){
+                if diff.x>=0.0{Side::Right}else{Side::Left}
+            } else if diff.y>=0.0{Side::Bottom}else{Side::Top};
+            let offset=if matches!(side,Side::Left|Side::Right){
+                ((center.y-base.min.y-remote.h as f32*scale*0.5)/scale).round() as i32
+            }else{
+                ((center.x-base.min.x-remote.w as f32*scale*0.5)/scale).round() as i32
             };
-            self.settings.layout = Layout {side, offset}.clamp(local,remote);
-            *self.state.layout.lock().unwrap() = self.settings.layout;
+            self.settings.layout=Layout{side,offset}.clamp(local,remote);
+            *self.state.layout.lock().unwrap()=self.settings.layout;
         }
-        if response.drag_stopped() { self.persist_settings(); }
-        ui.horizontal(|ui| {
-            ui.label(format!("{}: {}", tr(lang,"方向","Side"), side_name(self.settings.layout.side,lang)));
-            ui.label(format!("{}: {} px", tr(lang,"偏移","Offset"), self.settings.layout.offset));
-            if ui.button(tr(lang,"重置布局","Reset layout")).clicked() {
-                self.settings.layout = Layout::default();
-                *self.state.layout.lock().unwrap() = self.settings.layout;
-                self.persist_settings();
+        if response.drag_stopped(){
+            self.drag_start_layout=None;
+            self.persist_settings();
+        }
+        ui.horizontal_wrapped(|ui|{
+            ui.label(tr(lang,"方向","Direction"));
+            for (side,zh,en) in [
+                (Side::Left,"左侧","Left"),(Side::Right,"右侧","Right"),
+                (Side::Top,"上方","Above"),(Side::Bottom,"下方","Below")
+            ]{
+                if ui.selectable_label(self.settings.layout.side==side,tr(lang,zh,en)).clicked(){
+                    self.settings.layout=Layout{side,offset:self.settings.layout.offset}.clamp(local,remote);
+                    *self.state.layout.lock().unwrap()=self.settings.layout;
+                    self.drag_start_layout=None;
+                    self.persist_settings();
+                }
             }
         });
+        let bounds=if matches!(self.settings.layout.side,Side::Left|Side::Right){
+            (-remote.h+24)..=(local.h-24)
+        }else{(-remote.w+24)..=(local.w-24)};
+        let mut offset=self.settings.layout.offset;
+        if ui.add(egui::Slider::new(&mut offset,bounds)
+            .text(tr(lang,"错位偏移（像素）","Offset (pixels)"))).changed(){
+            self.settings.layout.offset=offset;
+            *self.state.layout.lock().unwrap()=self.settings.layout;
+            self.persist_settings();
+        }
+        if ui.button(tr(lang,"重置布局","Reset layout")).clicked(){
+            self.settings.layout=Layout::default();
+            *self.state.layout.lock().unwrap()=self.settings.layout;
+            self.drag_start_layout=None;
+            self.persist_settings();
+        }
     }
 }
 
