@@ -85,12 +85,13 @@ pub struct Settings {
     pub clipboard: bool,
     pub language: Language,
     pub listen_port: u16,
+    pub auto_start_receiver: bool,
 }
 impl Default for Settings {
     fn default()->Self { Self {
         role_server: false, address:"192.168.1.10:24881".into(),
         secret:String::new(), layout:Layout::default(), remap:true, clipboard:true,
-        language:Language::Zh, listen_port:24881,
+        language:Language::Zh, listen_port:24881, auto_start_receiver:true,
     } }
 }
 
@@ -130,6 +131,7 @@ mod tests {
         let s:Settings=serde_json::from_str(old).unwrap();
         assert_eq!(s.listen_port,24881);
         assert_eq!(s.language,Language::Zh);
+        assert!(s.auto_start_receiver);
     }
     #[test] fn each_direction(){
         let a=Screen::new(1920,1080); let b=Screen::new(1440,900);
