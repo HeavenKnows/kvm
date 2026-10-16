@@ -8,6 +8,7 @@ mod status;
 mod network;
 mod native_motion;
 mod native_cursor;
+mod display;
 #[cfg(target_os="macos")]
 mod macos_tray;
 
@@ -94,6 +95,7 @@ struct KvmApp {
     state: Arc<engine::Shared>,
     ips: Vec<Ipv4Addr>,
     drag_start_layout: Option<Layout>,
+    drag_start_group:Option<(i32,i32)>,
     #[cfg(target_os="macos")]
     tray: Option<macos_tray::MacMenuBar>,
 }
@@ -119,6 +121,7 @@ impl KvmApp {
         };
         Self { settings, state, ips: network::local_ipv4_addresses(),
             drag_start_layout:None,
+            drag_start_group:None,
             #[cfg(target_os="macos")]
             tray,
         }
@@ -151,88 +154,133 @@ impl KvmApp {
             "If multiple addresses appear, use one on the same LAN as the controller; VPN addresses may not work."));
     }
 
-    fn layout_ui(&mut self, ui: &mut egui::Ui, lang: Language) {
-        ui.label(tr(lang,"拖动蓝色屏幕调整位置，或用方向按钮直接设置上下左右。",
-            "Drag the blue screen, or use the four direction buttons below."));
-        let local=self.state.local_screen;
-        let remote=*self.state.remote_screen.lock().unwrap();
-        let (rect,_) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width().min(560.0),315.0),egui::Sense::hover());
-        // Leave space for peer on all four sides, not just to the right.
-        let scale=(rect.width()/(3.3*local.w.max(remote.w) as f32))
-            .min(rect.height()/(3.4*local.h.max(remote.h) as f32))
-            .min(0.15);
-        let base=egui::Rect::from_center_size(rect.center(),
-            egui::vec2(local.w as f32*scale,local.h as f32*scale));
-        let (ox,oy)=self.settings.layout.origin(local,remote);
-        let peer=egui::Rect::from_min_size(
-            base.min+egui::vec2(ox as f32*scale,oy as f32*scale),
-            egui::vec2(remote.w as f32*scale,remote.h as f32*scale));
+    /// Every physical display is drawn as a separate numbered monitor.
+    /// Drag a blue panel near ANY grey panel: the nearest physical edge
+    /// becomes the crossing anchor and the pair snaps exactly together.
+    fn layout_ui(&mut self,ui:&mut egui::Ui,lang:Language){
+        use model::{Display,group_origin,snap_to_edge};
+        let local=self.state.local_displays.clone();
+        let remote=self.state.remote_displays.lock().unwrap().clone();
+        if local.is_empty()||remote.is_empty(){return;}
+        self.settings.local_display=self.settings.local_display.min(local.len()-1);
+        self.settings.remote_display=self.settings.remote_display.min(remote.len()-1);
+        ui.heading(tr(lang,"显示器布局","Display arrangement"));
+        ui.label(tr(lang,
+            "灰色为本机，蓝色为接收端。拖动任意蓝色显示器，靠近灰色显示器边缘时自动吸附。",
+            "Grey: this computer. Blue: receiver. Drag any blue display near a grey display to snap to its edge."));
+        ui.horizontal_wrapped(|ui|{
+            ui.small(format!("{} {}  ·  {} {}",
+                tr(lang,"本机","Local"),local.len(),
+                tr(lang,"远端","Remote"),remote.len()));
+            ui.small(tr(lang,
+                "数字代表显示器顺序；跨屏点只在吸附的边缘生效",
+                "Numbers identify monitors; switching occurs at the snapped edge"));
+        });
+        let (area,_)=ui.allocate_exact_size(
+            egui::vec2(ui.available_width().min(730.0),365.0),egui::Sense::hover());
+        let scale=(area.width()/(self.state.local_screen.w.max(self.state.remote_screen.lock().unwrap().w) as f32*3.1))
+            .min(area.height()/(self.state.local_screen.h.max(self.state.remote_screen.lock().unwrap().h) as f32*3.2))
+            .clamp(0.012,0.22);
+        let local_origin=area.center()-egui::vec2(
+            self.state.local_screen.w as f32*scale*0.5,
+            self.state.local_screen.h as f32*scale*0.5);
         let painter=ui.painter();
-        painter.rect_filled(base,7.0,egui::Color32::from_rgb(95,104,119));
-        painter.text(base.center(),egui::Align2::CENTER_CENTER,
-            tr(lang,"本机","This PC"),egui::FontId::proportional(14.0),egui::Color32::WHITE);
-        painter.rect_filled(peer,7.0,egui::Color32::from_rgb(49,118,216));
-        painter.text(peer.center(),egui::Align2::CENTER_CENTER,
-            tr(lang,"另一台电脑","Other PC"),egui::FontId::proportional(14.0),egui::Color32::WHITE);
-        let response=ui.interact(peer,ui.id().with("peer-drag"),egui::Sense::drag());
-        if response.drag_started(){self.drag_start_layout=Some(self.settings.layout);}
-        if response.dragged(){
-            // drag_delta is cumulative from gesture START. Do not apply it
-            // repeatedly to last frame's already-updated peer position.
-            let original=self.drag_start_layout.unwrap_or(self.settings.layout);
-            let (ix,iy)=original.origin(local,remote);
-            let original_center=base.min
-                +egui::vec2(ix as f32*scale,iy as f32*scale)
-                +egui::vec2(remote.w as f32*scale,remote.h as f32*scale)*0.5;
-            let center=original_center+response.drag_delta();
-            let diff=center-base.center();
-            let side=if diff.x.abs()>diff.y.abs(){
-                if diff.x>=0.0{Side::Right}else{Side::Left}
-            } else if diff.y>=0.0{Side::Bottom}else{Side::Top};
-            let offset=if matches!(side,Side::Left|Side::Right){
-                ((center.y-base.min.y-remote.h as f32*scale*0.5)/scale).round() as i32
-            }else{
-                ((center.x-base.min.x-remote.w as f32*scale*0.5)/scale).round() as i32
-            };
-            self.settings.layout=Layout{side,offset}.clamp(local,remote);
-            *self.state.layout.lock().unwrap()=self.settings.layout;
+        painter.rect_filled(area,12.0,egui::Color32::from_rgb(19,28,46));
+        let to_rect=|d:Display,gx:i32,gy:i32|{
+            egui::Rect::from_min_size(
+                local_origin+egui::vec2((d.x+gx) as f32*scale,(d.y+gy) as f32*scale),
+                egui::vec2((d.w as f32*scale).max(12.0),(d.h as f32*scale).max(9.0)))
+        };
+        let (gx,gy)=group_origin(self.settings.layout,&local,&remote,
+            self.settings.local_display,self.settings.remote_display);
+        for (i,d) in local.iter().enumerate(){
+            let r=to_rect(*d,0,0);
+            let selected=i==self.settings.local_display;
+            painter.rect_filled(r,4.0,if selected {
+                egui::Color32::from_rgb(108,128,158)
+            }else{egui::Color32::from_rgb(76,91,113)});
+            painter.rect_stroke(r,4.0,
+                egui::Stroke::new(if selected{2.0}else{1.0},
+                    egui::Color32::from_rgb(209,222,240)),egui::StrokeKind::Inside);
+            painter.text(r.center(),egui::Align2::CENTER_CENTER,
+                format!("{} {}",tr(lang,"本机","Local"),i+1),
+                egui::FontId::proportional(12.0),egui::Color32::WHITE);
         }
-        if response.drag_stopped(){
-            self.drag_start_layout=None;
-            self.persist_settings();
+        for (i,d) in remote.iter().enumerate(){
+            let r=to_rect(*d,gx,gy);
+            let selected=i==self.settings.remote_display;
+            painter.rect_filled(r,4.0,if selected{
+                egui::Color32::from_rgb(33,128,225)
+            }else{egui::Color32::from_rgb(36,100,178)});
+            painter.rect_stroke(r,4.0,
+                egui::Stroke::new(if selected{2.0}else{1.0},
+                    egui::Color32::from_rgb(121,217,252)),egui::StrokeKind::Inside);
+            painter.text(r.center(),egui::Align2::CENTER_CENTER,
+                format!("{} {}",tr(lang,"远端","Remote"),i+1),
+                egui::FontId::proportional(12.0),egui::Color32::WHITE);
+            let drag=ui.interact(r,ui.id().with(("remote-monitor",i)),egui::Sense::drag());
+            if drag.drag_started(){
+                self.drag_start_layout=Some(self.settings.layout);
+                self.drag_start_group=Some((gx,gy));
+            }
+            if drag.dragged(){
+                // Every gesture is relative to its ORIGINAL position, not to
+                // the continuously snapped preview (avoids cumulative jumps).
+                let (sx,sy)=self.drag_start_group.unwrap_or((gx,gy));
+                let delta=drag.drag_delta()/scale;
+                let dest_x=d.x+sx+delta.x.round() as i32;
+                let dest_y=d.y+sy+delta.y.round() as i32;
+                let (li,layout)=snap_to_edge(&local,&remote,i,dest_x,dest_y);
+                self.settings.local_display=li;
+                self.settings.remote_display=i;
+                self.settings.layout=layout.clamp(local[li].screen(),d.screen());
+                *self.state.layout.lock().unwrap()=self.settings.layout;
+                self.state.set_layout_targets(li,i);
+            }
+            if drag.drag_stopped(){
+                self.drag_start_layout=None;
+                self.drag_start_group=None;
+                self.persist_settings();
+            }
         }
         ui.horizontal_wrapped(|ui|{
-            ui.label(tr(lang,"方向","Direction"));
-            for (side,zh,en) in [
-                (Side::Left,"左侧","Left"),(Side::Right,"右侧","Right"),
-                (Side::Top,"上方","Above"),(Side::Bottom,"下方","Below")
+            ui.label(tr(lang,"吸附方向","Snap direction"));
+            for (side,label_zh,label_en) in [
+                (Side::Left,"左","Left"),(Side::Right,"右","Right"),
+                (Side::Top,"上","Top"),(Side::Bottom,"下","Bottom")
             ]{
-                if ui.selectable_label(self.settings.layout.side==side,tr(lang,zh,en)).clicked(){
-                    self.settings.layout=Layout{side,offset:self.settings.layout.offset}.clamp(local,remote);
+                if ui.selectable_label(self.settings.layout.side==side,
+                        tr(lang,label_zh,label_en)).clicked(){
+                    self.settings.layout.side=side;
+                    self.settings.layout=self.settings.layout.clamp(
+                        local[self.settings.local_display].screen(),
+                        remote[self.settings.remote_display].screen());
                     *self.state.layout.lock().unwrap()=self.settings.layout;
-                    self.drag_start_layout=None;
+                    self.state.set_layout_targets(self.settings.local_display,self.settings.remote_display);
                     self.persist_settings();
                 }
             }
         });
+        let ld=local[self.settings.local_display];
+        let rd=remote[self.settings.remote_display];
         let bounds=if matches!(self.settings.layout.side,Side::Left|Side::Right){
-            (-remote.h+24)..=(local.h-24)
-        }else{(-remote.w+24)..=(local.w-24)};
-        let mut offset=self.settings.layout.offset;
-        if ui.add(egui::Slider::new(&mut offset,bounds)
-            .text(tr(lang,"错位偏移（像素）","Offset (pixels)"))).changed(){
-            self.settings.layout.offset=offset;
+            (-rd.h+24)..=(ld.h-24)
+        }else{(-rd.w+24)..=(ld.w-24)};
+        if ui.add(egui::Slider::new(&mut self.settings.layout.offset,bounds)
+                .text(tr(lang,"边缘偏移","Edge offset"))).changed(){
             *self.state.layout.lock().unwrap()=self.settings.layout;
             self.persist_settings();
         }
-        if ui.button(tr(lang,"重置布局","Reset layout")).clicked(){
-            self.settings.layout=Layout::default();
-            *self.state.layout.lock().unwrap()=self.settings.layout;
-            self.drag_start_layout=None;
-            self.persist_settings();
-        }
+        ui.small(format!("{} {} {} ↔ {} {} · {}",
+            tr(lang,"本机","Local"),self.settings.local_display+1,
+            tr(lang,"显示器","monitor"),
+            tr(lang,"远端","Remote"),self.settings.remote_display+1,
+            side_name(self.settings.layout.side,lang)));
+        ui.small(tr(lang,
+            "插拔显示器后请重启两端，重新连接会同步远端最新的显示器拓扑。",
+            "After plugging/unplugging displays, restart both apps; reconnect to refresh remote topology."));
     }
+
 }
 
 impl eframe::App for KvmApp {
@@ -251,7 +299,10 @@ impl eframe::App for KvmApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading(format!("kvm {}", env!("CARGO_PKG_VERSION")));
+                ui.heading("kvm");
+                ui.label(format!("v{}",env!("CARGO_PKG_VERSION")));
+                ui.label(tr(self.settings.language,
+                    "跨设备键鼠协作","Cross-device control"));
                 ui.separator();
                 ui.label("Language / 语言");
                 let selected = if self.settings.language == Language::Zh { "中文" } else { "English" };
@@ -266,8 +317,8 @@ impl eframe::App for KvmApp {
             });
             let lang = self.settings.language;
             ui.label(tr(lang,
-                "Windows ↔ macOS 键鼠共享 · 实验版本",
-                "Windows ↔ macOS keyboard and mouse sharing · experimental"));
+                "安全的局域网键盘鼠标共享 · Windows ↔ macOS",
+                "Secure LAN keyboard and mouse sharing · Windows ↔ macOS"));
             ui.separator();
             let started = self.state.started.load(Ordering::SeqCst);
 
