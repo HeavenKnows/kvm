@@ -1,4 +1,4 @@
-use crate::{input, model::{Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
+use crate::{cursor,input, model::{Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
 use std::{collections::HashSet,net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,Ordering},mpsc::{self,SyncSender}},time::Duration};
 const MAX_TEXT:usize=32*1024;
@@ -25,6 +25,11 @@ pub struct Shared {
     pub active:AtomicBool,
     pub ready:AtomicBool,
     pub started:AtomicBool,
+    stop_requested:AtomicBool,
+    socket:Mutex<Option<TcpStream>>,
+    recenter_requested:AtomicBool,
+    ignore_warp:AtomicBool,
+    cursor_last:Mutex<Option<(i32,i32)>>,
     capture_started:AtomicBool,
     paste_sender:Mutex<Option<SyncSender<()>>>,
     pub clipboard:AtomicBool,
@@ -45,6 +50,9 @@ impl Shared {
             target:Mutex::new(Platform::Mac),active:AtomicBool::new(false),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
+            stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
+            recenter_requested:AtomicBool::new(false),ignore_warp:AtomicBool::new(false),
+            cursor_last:Mutex::new(None),
             clipboard:AtomicBool::new(s.clipboard),remap:AtomicBool::new(s.remap),
             owner:Mutex::new(Owner::Local),
             pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
@@ -52,6 +60,32 @@ impl Shared {
         })
     }
     pub fn info(&self,status:UiStatus){*self.status.lock().unwrap()=status;}
+    fn store_socket(&self,sock:&TcpStream)->std::io::Result<()> {
+        *self.socket.lock().unwrap()=Some(sock.try_clone()?);
+        Ok(())
+    }
+    fn shutdown_peer(&self) {
+        self.active.store(false,Ordering::SeqCst);
+        self.ready.store(false,Ordering::SeqCst);
+        self.recenter_requested.store(false,Ordering::SeqCst);
+        self.ignore_warp.store(false,Ordering::SeqCst);
+        if let Some(sock)=self.socket.lock().unwrap().take(){
+            let _=sock.shutdown(std::net::Shutdown::Both);
+        }
+    }
+    /// User-initiated disconnect; receiver keeps listening for the next client.
+    pub fn disconnect_peer(&self){
+        if self.active.load(Ordering::SeqCst) {
+            self.return_cursor();
+        }
+        self.shutdown_peer();
+        self.info(UiStatus::UserDisconnected);
+    }
+    /// Stop listening or abort connecting. The worker clears started on exit.
+    pub fn stop(&self){
+        self.stop_requested.store(true,Ordering::SeqCst);
+        self.disconnect_peer();
+    }
     fn flush_motion(&self){
         let dx=self.pending_dx.swap(0,Ordering::Relaxed);
         let dy=self.pending_dy.swap(0,Ordering::Relaxed);
@@ -86,11 +120,13 @@ impl Shared {
     fn close(&self){
         self.active.store(false,Ordering::SeqCst);
         self.ready.store(false,Ordering::SeqCst);
+        self.shutdown_peer();
         self.out.lock().unwrap().take();
         self.paste_sender.lock().unwrap().take();
         *self.owner.lock().unwrap() = Owner::Local;
         self.pending_dx.store(0,Ordering::Relaxed);
         self.pending_dy.store(0,Ordering::Relaxed);
+        *self.cursor_last.lock().unwrap()=None;
     }
 }
 fn clipboard_get()->Option<String>{
