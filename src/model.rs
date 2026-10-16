@@ -20,6 +20,98 @@ pub struct Screen { pub w: i32, pub h: i32 }
 impl Screen {
     pub fn new(w:i32,h:i32)->Self { Self {w:w.max(100),h:h.max(100)} }
 }
+#[derive(Debug,Clone,Copy,Serialize,Deserialize,PartialEq,Eq)]
+pub struct Display {
+    pub x:i32,pub y:i32,pub w:i32,pub h:i32,
+}
+impl Display {
+    pub fn screen(self)->Screen{Screen::new(self.w,self.h)}
+    pub fn contains(self,x:i32,y:i32)->bool{
+        x>=self.x && x<self.x+self.w && y>=self.y && y<self.y+self.h
+    }
+    pub fn closest(self,x:i32,y:i32)->(i32,i32){
+        (x.clamp(self.x,self.x+self.w-1),y.clamp(self.y,self.y+self.h-1))
+    }
+}
+pub fn desktop_size(displays:&[Display])->Screen {
+    let xmax=displays.iter().map(|d|d.x+d.w).max().unwrap_or(1920);
+    let ymax=displays.iter().map(|d|d.y+d.h).max().unwrap_or(1080);
+    Screen::new(xmax,ymax)
+}
+pub fn closest_on_displays(displays:&[Display],x:i32,y:i32)->(i32,i32){
+    displays.iter().map(|d|d.closest(x,y))
+        .min_by_key(|&(px,py)| (px as i64-x as i64).pow(2)+(py as i64-y as i64).pow(2))
+        .unwrap_or((x,y))
+}
+pub fn single_display(screen:Screen)->Vec<Display>{
+    vec![Display{x:0,y:0,w:screen.w,h:screen.h}]
+}
+/// A remote display group is positioned so selected remote/local displays
+/// share the chosen edge. Display geometry is normalized to each desktop.
+pub fn group_origin(
+    layout:Layout,local:&[Display],remote:&[Display],
+    local_index:usize,remote_index:usize
+)->(i32,i32){
+    let l=local.get(local_index).or_else(||local.first()).copied()
+        .unwrap_or(Display{x:0,y:0,w:1920,h:1080});
+    let r=remote.get(remote_index).or_else(||remote.first()).copied()
+        .unwrap_or(Display{x:0,y:0,w:1920,h:1080});
+    match layout.side{
+        Side::Right=>(l.x+l.w-r.x,l.y+layout.offset-r.y),
+        Side::Left=>(l.x-r.w-r.x,l.y+layout.offset-r.y),
+        Side::Top=>(l.x+layout.offset-r.x,l.y-r.h-r.y),
+        Side::Bottom=>(l.x+layout.offset-r.x,l.y+l.h-r.y),
+    }
+}
+pub fn entering_multi(
+    layout:Layout,x:i32,y:i32,local:&[Display],remote:&[Display],
+    local_index:usize,remote_index:usize
+)->Option<(i32,i32)>{
+    let l=local.get(local_index)?;
+    let r=remote.get(remote_index)?;
+    let (gx,gy)=group_origin(layout,local,remote,local_index,remote_index);
+    let (rx,ry)=(x-gx,y-gy);
+    let at_edge=match layout.side {
+        Side::Right=>x>=l.x+l.w-3 && x<l.x+l.w && y>=l.y && y<l.y+l.h,
+        Side::Left=>x<=l.x+2 && x>=l.x && y>=l.y && y<l.y+l.h,
+        Side::Top=>y<=l.y+2 && y>=l.y && x>=l.x && x<l.x+l.w,
+        Side::Bottom=>y>=l.y+l.h-3 && y<l.y+l.h && x>=l.x && x<l.x+l.w,
+    };
+    if !at_edge || !r.contains(rx,ry){return None;}
+    // Do not steal the pointer from a neighboring local monitor. Only an
+    // exposed physical edge can switch between computers.
+    let (nx,ny)=match layout.side{
+        Side::Right=>(x+4,y),Side::Left=>(x-4,y),
+        Side::Top=>(x,y-4),Side::Bottom=>(x,y+4),
+    };
+    if local.iter().any(|d|d.contains(nx,ny)){return None;}
+    Some(r.closest(rx,ry))
+}
+/// Find the nearest exposed local-display edge to a freely dragged remote
+/// panel, then determine the snapped side and perpendicular offset.
+pub fn snap_to_edge(
+    local:&[Display],remote:&[Display],remote_index:usize,
+    dragged_x:i32,dragged_y:i32
+)->(usize,Layout){
+    let r=remote.get(remote_index).or_else(||remote.first()).copied()
+        .unwrap_or(Display{x:0,y:0,w:1920,h:1080});
+    let mut best=None::<(i64,usize,Layout)>;
+    for (i,l) in local.iter().enumerate(){
+        let overlap_y=(dragged_y+r.h).min(l.y+l.h)-dragged_y.max(l.y);
+        let overlap_x=(dragged_x+r.w).min(l.x+l.w)-dragged_x.max(l.x);
+        for (side,edge_gap,overlap,offset) in [
+            (Side::Right,(dragged_x-(l.x+l.w)).abs(),overlap_y,dragged_y-l.y),
+            (Side::Left,(dragged_x+r.w-l.x).abs(),overlap_y,dragged_y-l.y),
+            (Side::Top,(dragged_y+r.h-l.y).abs(),overlap_x,dragged_x-l.x),
+            (Side::Bottom,(dragged_y-(l.y+l.h)).abs(),overlap_x,dragged_x-l.x)
+        ]{
+            let score=edge_gap as i64 + if overlap<=0{(-overlap+100) as i64}else{0};
+            let candidate=(score,i,Layout{side,offset});
+            if best.as_ref().is_none_or(|v|score<v.0){best=Some(candidate);}
+        }
+    }
+    best.map(|(_,i,layout)|(i,layout)).unwrap_or((0,Layout::default()))
+}
 impl Layout {
     pub fn origin(self, local: Screen, remote: Screen) -> (i32, i32) {
         match self.side {
@@ -86,6 +178,9 @@ pub struct Settings {
     pub language: Language,
     pub listen_port: u16,
     pub auto_start_receiver: bool,
+    /// Chosen monitor pair used as the crossing edge anchor.
+    pub local_display:usize,
+    pub remote_display:usize,
     /// Multiplier for unaccelerated device-count deltas on the controller.
     pub mouse_speed:f32,
 }
@@ -94,7 +189,7 @@ impl Default for Settings {
         role_server: false, address:"192.168.1.10:24881".into(),
         secret:String::new(), layout:Layout::default(), remap:true, clipboard:true,
         language:Language::Zh, listen_port:24881, auto_start_receiver:true,
-        mouse_speed:1.6,
+        mouse_speed:1.6,local_display:0,remote_display:0,
     } }
 }
 
@@ -141,6 +236,8 @@ mod tests {
         assert_eq!(s.listen_port,24881);
         assert_eq!(s.language,Language::Zh);
         assert!(s.auto_start_receiver);
+        assert_eq!(s.local_display,0);
+        assert_eq!(s.remote_display,0);
         assert_eq!(s.mouse_speed,1.6);
     }
     #[test] fn vertical_offset_and_edge_transfer(){
@@ -153,6 +250,29 @@ mod tests {
         let bottom=Layout{side:Side::Bottom,offset:-90};
         assert!(bottom.entering(150,1079,local,remote));
         assert_eq!(bottom.entry(150,1079,local,remote),(240,3));
+    }
+    #[test] fn multi_monitor_edge_and_snap(){
+        let local=vec![
+            Display{x:0,y:0,w:1920,h:1080},
+            Display{x:1920,y:0,w:1600,h:900}
+        ];
+        let remote=vec![
+            Display{x:0,y:0,w:1440,h:900},
+            Display{x:1440,y:0,w:1024,h:768}
+        ];
+        let right=Layout{side:Side::Right,offset:0};
+        assert_eq!(group_origin(right,&local,&remote,1,0),(3520,0));
+        assert_eq!(entering_multi(right,3519,400,&local,&remote,1,0),Some((3,400)));
+        assert_eq!(entering_multi(right,1919,400,&local,&remote,0,0),None);
+        let (i,layout)=snap_to_edge(&local,&remote,0,3540,100);
+        assert_eq!(i,1);
+        assert_eq!(layout.side,Side::Right);
+        assert_eq!(layout.offset,100);
+    }
+    #[test] fn remote_desktop_gap_is_not_valid_mouse_target(){
+        let d=vec![Display{x:0,y:300,w:1000,h:800},Display{x:1000,y:0,w:800,h:800}];
+        assert_eq!(closest_on_displays(&d,500,20),(500,300));
+        assert_eq!(desktop_size(&d).h,1100);
     }
     #[test] fn each_direction(){
         let a=Screen::new(1920,1080); let b=Screen::new(1440,900);
