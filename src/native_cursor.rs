@@ -25,10 +25,16 @@ mod mac {
         #[cfg(test)]
         fn CGEventGetIntegerValueField(event:*const c_void,field:u32)->i64;
         fn AXIsProcessTrusted()->bool;
+        fn AXIsProcessTrustedWithOptions(options:*const c_void)->bool;
+        static kAXTrustedCheckOptionPrompt:*const c_void;
     }
     #[link(name="CoreFoundation",kind="framework")]
     extern "C" {
         fn CFRelease(obj:*mut c_void);
+        fn CFDictionaryCreate(allocator:*const c_void,keys:*const *const c_void,
+            values:*const *const c_void,count:isize,key_callbacks:*const c_void,
+            value_callbacks:*const c_void)->*mut c_void;
+        static kCFBooleanTrue:*const c_void;
     }
     // CGEventType: left down/up 1/2, right 3/4, other 25/26.
     // CGMouseButton: left 0, right 1, center 2.
@@ -83,6 +89,27 @@ mod mac {
         }
     }
     pub fn trusted()->bool{unsafe{AXIsProcessTrusted()}}
+    pub fn request_permission()->Result<(),String>{
+        if trusted(){return Ok(());}
+        // Explicit user interaction. Apple's API merely prompts the user to
+        // approve Accessibility; it cannot grant TCC permission on its own.
+        unsafe{
+            let keys=[kAXTrustedCheckOptionPrompt];
+            let values=[kCFBooleanTrue];
+            let opts=CFDictionaryCreate(std::ptr::null(),keys.as_ptr(),
+                values.as_ptr(),1,std::ptr::null(),std::ptr::null());
+            if !opts.is_null(){
+                let _=AXIsProcessTrustedWithOptions(opts);
+                CFRelease(opts);
+            }
+        }
+        // Open the exact control as a useful fallback if the OS has already
+        // dismissed the Accessibility prompt. User must flip the system toggle.
+        std::process::Command::new("/usr/bin/open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            .spawn().map_err(|e|format!("无法打开辅助功能设置：{e}"))?;
+        Ok(())
+    }
     pub fn click(button:rdev::Button,pressed:bool,x:i32,y:i32)->Result<(),String>{
         if !trusted() {
             return Err("macOS Accessibility permission is not granted to kvm.app; enable it in System Settings > Privacy & Security > Accessibility".into());
@@ -240,6 +267,15 @@ pub fn accessibility_trusted()->bool{
     {mac::trusted()}
     #[cfg(not(target_os="macos"))]
     {true}
+}
+
+/// Prompt macOS to open its Accessibility permission pane. This deliberately
+/// never claims to auto-authorize: user approval is mandatory.
+pub fn request_accessibility_permission()->Result<(),String>{
+    #[cfg(target_os="macos")]
+    {return mac::request_permission();}
+    #[cfg(not(target_os="macos"))]
+    {Ok(())}
 }
 
 /// Send a native mouse drag event on every motion update while a button is held.

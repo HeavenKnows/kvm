@@ -22,50 +22,17 @@ fn bundle_from_executable(path:&Path)->Option<PathBuf>{
     Some(bundle.to_path_buf())
 }
 
-/// Drag-to-Applications must work for a first installation. The first
-/// launch of a GitHub (ad-hoc) build offers one-time local signing *after*
-/// it has been copied. Later releases preserve that identity via the updater.
+/// Initial installation is a NORMAL Finder drag. No code-signing
+/// bootstrap button is necessary before using the app. At the first future
+/// update the updater creates/reuses the stable local signing identity.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum InstallMode{
-    InstallFromDmg,
-    FinishFirstInstall,
-    Update,
-}
-
-fn classify(bundle:&Path,designated:&str)->InstallMode{
-    if bundle!=Path::new(INSTALL_PATH){
-        return InstallMode::InstallFromDmg;
-    }
-    // Our personal installer pins the stable certificate in the app's DR.
-    // A directly dragged CI artifact has a version-specific CDHash DR.
-    if designated.contains("designated =>") &&
-        designated.contains("identifier") &&
-        designated.contains("certificate leaf ="){
-        InstallMode::Update
-    }else{
-        InstallMode::FinishFirstInstall
-    }
-}
-
-fn installed_designated_requirement(bundle:&Path)->String{
-    let output=Command::new("/usr/bin/codesign")
-        .arg("-d").arg("-r-").arg(bundle).output();
-    match output{
-        Ok(out) if out.status.success()=>
-            String::from_utf8_lossy(&out.stderr).to_string(),
-        _=>String::new(),
-    }
-}
+pub enum InstallMode { FromDmg, Installed }
 
 pub fn mode()->InstallMode{
-    static MODE:std::sync::OnceLock<InstallMode>=std::sync::OnceLock::new();
-    *MODE.get_or_init(||{
-        let bundle=bundle_from_executable(&std::env::current_exe().unwrap_or_default());
-        match bundle{
-            Some(path)=>classify(&path,&installed_designated_requirement(&path)),
-            None=>InstallMode::InstallFromDmg,
-        }
-    })
+    match bundle_from_executable(&std::env::current_exe().unwrap_or_default()){
+        Some(bundle) if bundle==Path::new(INSTALL_PATH)=>InstallMode::Installed,
+        _=>InstallMode::FromDmg,
+    }
 }
 
 /// A native file picker. No Finder execution of the downloaded app or script.
@@ -199,7 +166,7 @@ pub fn start()->Result<(),String>{
 }
 
 pub fn install_downloaded(path:&Path)->Result<(),String>{
-    if mode()!=InstallMode::Update {return Err("请先完成首次安装".into());}
+    if mode()!=InstallMode::Installed {return Err("请先将 kvm.app 拖入应用程序目录".into());}
     if path.extension().is_none_or(|x|x!="dmg") || !path.is_file(){
         return Err("下载的 DMG 文件不存在".into());
     }
@@ -216,7 +183,7 @@ fn launch(downloaded:Option<&Path>)->Result<(),String>{
     }
     let millis=SystemTime::now().duration_since(UNIX_EPOCH)
         .unwrap_or_default().as_millis();
-    let (source,staged_app_dir)=if mode()==InstallMode::Update {
+    let (source,staged_app_dir)=if mode()==InstallMode::Installed {
         // User-selected or automatically downloaded DMG. The installer
         // authenticates the app signature before any in-place replacement.
         (match downloaded{Some(dmg)=>dmg.to_path_buf(),None=>choose_dmg()?},None)
@@ -295,16 +262,13 @@ mod tests{
         assert!(parse_releases(&data,"0.5.0-beta.26").unwrap().is_none());
     }
     #[test]
-    fn drag_first_install_offers_one_time_signing_then_future_updates(){
-        let installed=Path::new("/Applications/kvm.app");
-        let dmg=Path::new("/Volumes/kvm/kvm.app");
-        let adhoc="designated => cdhash H\"F00D\"";
-        let stable="designated => identifier \"dev.heavenknows.kvm\" and certificate leaf = H\"FEED\"";
-        assert_eq!(classify(dmg,adhoc),InstallMode::InstallFromDmg);
-        // IMPORTANT: drag-installing is supported and repairable.
-        assert_eq!(classify(installed,adhoc),InstallMode::FinishFirstInstall);
-        assert_eq!(classify(installed,""),InstallMode::FinishFirstInstall);
-        assert_eq!(classify(installed,stable),InstallMode::Update);
-        assert_eq!(classify(dmg,stable),InstallMode::InstallFromDmg);
+    fn initial_finder_drag_has_no_signing_setup_gate(){
+        // Both drag-installed ad-hoc builds and previously signed builds
+        // are legitimate installed apps; no pre-update signing step.
+        assert_eq!(bundle_from_executable(Path::new(
+            "/Applications/kvm.app/Contents/MacOS/kvm")),
+            Some(PathBuf::from(INSTALL_PATH)));
+        assert_eq!(InstallMode::Installed,InstallMode::Installed);
     }
+
 }

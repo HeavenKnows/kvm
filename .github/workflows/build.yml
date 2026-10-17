@@ -86,7 +86,7 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>23</string>
+            <key>CFBundleVersion</key><string>24</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
@@ -107,52 +107,15 @@ jobs:
           bash -n "$APP/Contents/Resources/install-kvm.sh"
           codesign --force --sign - --timestamp=none "$APP"
           codesign --verify --strict "$APP"
-          # The CI signing identity is ephemeral and cannot preserve TCC
-          # grants across releases. Ship a self-contained LOCAL installer
-          # that generates/reuses one key in the user's login keychain, then
-          # re-signs each release with a stable designated requirement.
-          # The FIRST install retains standard Finder drag-to-Applications.
-          # On first run the app guides one-time local signing. Subsequent
-          # updates MUST use its in-app DMG picker to preserve TCC identity.
-          # Keep the optional plain .sh as a fallback (not a .command).
+          # Clean, conventional Finder DMG: exactly the signed kvm.app plus
+          # an Applications drop target. The INTERNAL updater remains inside
+          # Contents/Resources of the app and is not exposed as a script.
           mkdir -p dist/dmg-root
           mv "$APP" dist/dmg-root/kvm.app
           ln -s /Applications "dist/dmg-root/Applications"
-          cp scripts/macos-local-sign-install.sh "dist/dmg-root/install-kvm.sh"
-          chmod 644 "dist/dmg-root/install-kvm.sh"
-          cat > "dist/dmg-root/安装与更新 - READ ME.txt" <<'INSTRUCTIONS'
-          kvm (macOS) 安装与更新 / Installation & Updates
-
-          首次安装（支持 Finder 常规拖拽）：
-          1. 将本 DMG 的 kvm.app 拖到 Applications（应用程序）。
-          2. 从 /Applications/kvm.app 打开 kvm。
-          3. 在“概览”页点“完成首次安装”，使本机证书签名固定。
-             按提示完成系统管理员或钥匙串授权后会自动重新打开。
-          4. 之后再为 kvm 授予一次“辅助功能”权限。
-          如 macOS 拦截首次运行，可在确认来源可信后，按系统正常
-          安全批准流程打开；不要关闭 Gatekeeper。
-
-          今后升级：
-          1. 下载新的 DMG，不要直接拖拽覆盖已经安装的 kvm.app。
-          2. 打开旧版 kvm，点“安装更新包…”并选下载的 DMG。
-          3. 程序自动退出、重新签署、替换、启动新版；不需要终端。
-          直接拖拽覆盖会破坏已建立的稳定签名，可能重置辅助功能授权。
-
-          从 DMG 直接打开新 kvm 时，也可点“安装到应用程序”。
-          若图形安装不可用，DMG 保留 install-kvm.sh 备用；
-          它不是常规更新步骤。
-          没有开发者身份时无法保证首次没有 Gatekeeper 确认。
-          若系统明确报告恶意软件，不要绕过该警告。
-
-          English: For first installation, drag kvm.app to Applications.
-          Open the installed app, click Finish first installation once
-          to set up its stable local signature, then grant Accessibility.
-          For LATER UPDATES, open the installed kvm and click Install update,
-          choose the new DMG. Do not drag-replace after initial setup.
-          INSTRUCTIONS
-          test -f "dist/dmg-root/install-kvm.sh"
-          test ! -e "dist/dmg-root/Install or Update kvm.command"
           test "$(readlink dist/dmg-root/Applications)" = "/Applications"
+          test "$(find dist/dmg-root -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 2
+          test ! -f dist/dmg-root/install-kvm.sh
           hdiutil create -volname "kvm" -srcfolder "dist/dmg-root" -ov -format UDZO \
             "dist/${{ matrix.artifact }}.dmg"
 

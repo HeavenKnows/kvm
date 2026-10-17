@@ -332,6 +332,8 @@ struct KvmApp {
     mac_update_latest:Option<macos_update::RemoteRelease>,
     #[cfg(target_os="macos")]
     mac_update_busy_message:Option<String>,
+    #[cfg(target_os="macos")]
+    mac_auto_check_started:bool,
     #[cfg(target_os="windows")]
     win_tray:Option<windows_tray::WindowsTray>,
     #[cfg(target_os="windows")]
@@ -440,6 +442,8 @@ impl KvmApp {
             mac_update_latest:None,
             #[cfg(target_os="macos")]
             mac_update_busy_message:None,
+            #[cfg(target_os="macos")]
+            mac_auto_check_started:false,
             #[cfg(target_os="windows")]
             win_tray:None,
             #[cfg(target_os="windows")]
@@ -459,6 +463,22 @@ impl KvmApp {
         }
     }
     fn persist_settings(&self) { model::save(&self.settings); }
+    #[cfg(target_os="macos")]
+    fn check_online_updates(&mut self,ctx:&egui::Context){
+        if self.mac_update_check_rx.is_some() || self.mac_update_download_rx.is_some(){
+            return;
+        }
+        let (tx,rx)=mpsc::channel();
+        self.mac_update_check_rx=Some(rx);
+        self.mac_update_latest=None;
+        self.mac_update_error=None;
+        self.mac_update_busy_message=Some("正在检查更新… / Checking updates…".into());
+        let ctx=ctx.clone();
+        std::thread::spawn(move||{
+            let _=tx.send(macos_update::check_latest());
+            ctx.request_repaint();
+        });
+    }
 
     fn receiver_addresses(&mut self, ui: &mut egui::Ui, lang: Language) {
         ui.horizontal(|ui| {
@@ -656,6 +676,22 @@ impl KvmApp {
             }
 
         });
+        #[cfg(target_os="macos")]
+        if !native_cursor::accessibility_trusted(){
+            ui.add_space(10.0);
+            section_card(ui,tr(lang,"辅助功能权限","Accessibility permission"),|ui|{
+                ui.colored_label(egui::Color32::from_rgb(236,182,78),
+                    tr(lang,"尚未授权辅助功能","Accessibility is not authorized"));
+                if ui.button(tr(lang,"授权辅助功能…","Authorize Accessibility…")).clicked(){
+                    if let Err(e)=native_cursor::request_accessibility_permission(){
+                        self.mac_update_error=Some(e);
+                    }
+                }
+                ui.label(tr(lang,
+                    "点击后在 macOS 系统设置中为 kvm 开启权限，系统要求由你确认。",
+                    "Turn on kvm in macOS System Settings; macOS requires your approval."));
+            });
+        }
         ui.add_space(12.0);
         section_card(ui,tr(lang,"设备与连接","Devices & connection"),|ui|{
             ui.label(tr(lang,"本机角色","This computer's role"));
@@ -690,12 +726,6 @@ impl KvmApp {
                             "Receiver is not listening. Click Start receiver."));
                 }
 
-                #[cfg(target_os="macos")]
-                if !native_cursor::accessibility_trusted(){
-                    ui.colored_label(egui::Color32::YELLOW,tr(lang,
-                        "未获得辅助功能权限；鼠标点击和键盘注入可能无法工作。",
-                        "Accessibility permission missing; remote clicks/keys may not work."));
-                }
             }else{
                 ui.horizontal_wrapped(|ui|{
                     ui.label(tr(lang,"接收端 IP:端口","Receiver IP:port"));
@@ -741,73 +771,57 @@ impl KvmApp {
         #[cfg(target_os="macos")]
         {
             ui.add_space(12.0);
-            // A normal Finder drag-to-Applications installs the downloaded
-            // ad-hoc bundle. Offer one-time signing after the drag, not a
-            // misleading "choose update DMG" picker on first launch.
-            let mode=macos_update::mode();
-            let label=match mode{
-                macos_update::InstallMode::InstallFromDmg=>
-                    tr(lang,"安装到应用程序","Install to Applications"),
-                macos_update::InstallMode::FinishFirstInstall=>
-                    tr(lang,"完成首次安装","Finish first installation"),
-                macos_update::InstallMode::Update=>
-                    tr(lang,"从本地 DMG 更新…","Update from local DMG…"),
-            };
-            if mode==macos_update::InstallMode::FinishFirstInstall{
-                ui.label(tr(lang,
-                    "首次安装后完成一次签名设置，再授予辅助功能权限。",
-                    "Finish one-time signing setup before granting Accessibility."));
-            }
-            if ui.button(label).clicked(){
-                match macos_update::start(){
-                    Ok(())=>{
-                        self.persist_settings();
-                        self.state.stop();
-                        std::process::exit(0);
-                    },
-                    Err(error)=>self.mac_update_error=Some(error),
-                }
-            }
-            if mode==macos_update::InstallMode::Update {
-                ui.add_space(5.0);
-                let busy=self.mac_update_check_rx.is_some() ||
-                    self.mac_update_download_rx.is_some();
-                if let Some(release)=&self.mac_update_latest{
-                    let release=release.clone();
-                    if ui.add_enabled(!busy,egui::Button::new(format!(
-                        "{} v{}",tr(lang,"下载并安装","Download and install"),
-                        release.version))).clicked(){
-                        let (tx,rx)=mpsc::channel();
-                        self.mac_update_download_rx=Some(rx);
-                        self.mac_update_busy_message=Some(tr(lang,
-                            "正在下载新版…","Downloading update…").into());
-                        self.mac_update_error=None;
-                        let ctx=ui.ctx().clone();
-                        std::thread::spawn(move||{
-                            let _=tx.send(macos_update::download_release(&release));
-                            ctx.request_repaint();
-                        });
-                    }
-                }else if ui.add_enabled(!busy,egui::Button::new(
-                    tr(lang,"检查在线更新","Check for updates"))).clicked(){
-                    let (tx,rx)=mpsc::channel();
-                    self.mac_update_check_rx=Some(rx);
-                    self.mac_update_busy_message=Some(tr(lang,
-                        "正在检查更新…","Checking for updates…").into());
-                    self.mac_update_error=None;
-                    let ctx=ui.ctx().clone();
-                    std::thread::spawn(move||{
-                        let _=tx.send(macos_update::check_latest());
-                        ctx.request_repaint();
+            section_card(ui,tr(lang,"更新","Updates"),|ui|{
+                // The first installation is a normal Finder drag. No local
+                // signing bootstrap or "finish installation" step in the UI.
+                if macos_update::mode()==macos_update::InstallMode::Installed {
+                    let busy=self.mac_update_check_rx.is_some() ||
+                        self.mac_update_download_rx.is_some();
+                    ui.horizontal_wrapped(|ui|{
+                        if ui.add_enabled(!busy,egui::Button::new(
+                            tr(lang,"检查更新","Check for updates"))).clicked(){
+                            self.check_online_updates(ui.ctx());
+                        }
+                        if let Some(release)=self.mac_update_latest.clone(){
+                            if ui.add_enabled(!busy,egui::Button::new(format!(
+                                "{} v{}",tr(lang,"下载并安装","Download & install"),
+                                release.version))).clicked(){
+                                let (tx,rx)=mpsc::channel();
+                                self.mac_update_download_rx=Some(rx);
+                                self.mac_update_busy_message=Some(tr(lang,
+                                    "正在下载更新…","Downloading update…").into());
+                                self.mac_update_error=None;
+                                let ctx=ui.ctx().clone();
+                                std::thread::spawn(move||{
+                                    let _=tx.send(macos_update::download_release(&release));
+                                    ctx.request_repaint();
+                                });
+                            }
+                        }
                     });
+                    if ui.add_enabled(!busy,egui::Button::new(
+                        tr(lang,"从本地 DMG 更新…","Update from local DMG…"))).clicked(){
+                        match macos_update::start(){
+                            Ok(())=>{
+                                self.persist_settings();
+                                self.state.stop();
+                                std::process::exit(0);
+                            },
+                            Err(error)=>self.mac_update_error=Some(error),
+                        }
+                    }
+                }else{
+                    ui.label(tr(lang,
+                        "请先将 kvm.app 拖入“应用程序”目录，再打开它检查更新。",
+                        "Drag kvm.app to Applications and open it to check for updates."));
                 }
                 if let Some(message)=&self.mac_update_busy_message{
                     ui.label(message);
                 }
-            }
-            if let Some(error)=&self.mac_update_error{
-                ui.colored_label(egui::Color32::from_rgb(240,125,110),error);
-            }
+                if let Some(error)=&self.mac_update_error{
+                    ui.colored_label(egui::Color32::from_rgb(240,125,110),error);
+                }
+            });
         }
         ui.add_space(12.0);
     }
@@ -851,6 +865,15 @@ impl KvmApp {
                     "Clipboard on demand (text, images, files; 32 MiB per paste)")).changed(){
                 self.state.clipboard.store(self.settings.clipboard,Ordering::SeqCst);
                 self.persist_settings();
+            }
+            #[cfg(target_os="macos")]
+            if ui.checkbox(&mut self.settings.auto_check_updates,
+                tr(lang,"启动时自动检查更新（安装前需确认）",
+                   "Automatically check updates on launch (install requires approval)")).changed(){
+                self.persist_settings();
+                if self.settings.auto_check_updates{
+                    self.check_online_updates(ui.ctx());
+                }
             }
         });
         ui.add_space(12.0);
@@ -1133,6 +1156,15 @@ impl eframe::App for KvmApp {
         }
         #[cfg(target_os="macos")]
         {
+            // Start exactly one nonblocking check shortly after startup.
+            // No auto-install: choosing a newer version stays user-controlled.
+            if !self.mac_auto_check_started && self.frames>=5 {
+                self.mac_auto_check_started=true;
+                if self.settings.auto_check_updates &&
+                   macos_update::mode()==macos_update::InstallMode::Installed {
+                    self.check_online_updates(ctx);
+                }
+            }
             // Poll nonblocking download/check workers. No HTTP, hashing, or
             // file copying may run inside an egui frame.
             if let Some(rx)=&self.mac_update_check_rx{
