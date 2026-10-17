@@ -81,7 +81,7 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>16</string>
+            <key>CFBundleVersion</key><string>17</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
@@ -94,10 +94,21 @@ jobs:
           test "$(plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" = true
           test ! -f "$APP/Contents/Resources/kvm.icns"
           codesign --force --sign - --timestamp=none "$APP"
-          # Conventional drag-to-Applications DMG. Finder shows kvm.app
-          # alongside a symlink to the system Applications folder.
+          # The CI signing identity is ephemeral and cannot preserve TCC
+          # grants across releases. Ship a self-contained LOCAL installer
+          # that generates/reuses one key in the user's login keychain, then
+          # re-signs each release with a stable designated requirement.
+          bash -n scripts/macos-local-sign-install.sh
+          # Exercise the first-time identity bootstrap on real macOS.
+          bash scripts/macos-local-sign-install.sh --setup
+          bash scripts/macos-local-sign-install.sh --check
+          # Keep the public DMG unnotarized; no private key is shipped.
+          # Users must run this installer instead of drag-to-Applications
+          # to preserve Accessibility grants on future updates.
           mkdir -p dist/dmg-root
           mv "$APP" dist/dmg-root/kvm.app
+          cp scripts/macos-local-sign-install.sh "dist/dmg-root/Install or Update kvm.command"
+          chmod 755 "dist/dmg-root/Install or Update kvm.command"
           ln -s /Applications dist/dmg-root/Applications
           hdiutil create -volname "kvm" -srcfolder "dist/dmg-root" -ov -format UDZO \
             "dist/${{ matrix.artifact }}.dmg"

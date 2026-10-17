@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.16，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.17，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -56,6 +56,24 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **侧键**：Windows 的 XBUTTON1/XBUTTON2 会跨机传输。Mac 默认把侧键按下映射为 `⌘[`（后退）和 `⌘]`（前进）；接收端「偏好设置 → 鼠标侧键」可改为原生 Mouse Button 4/5。鼠标厂商专有的 Windows 宏、驱动自定义组合键并不会自动同步到 Mac，必须由目标系统或本工具显式映射。
 - **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
 - **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
+
+## beta.17：无付费开发者账号保留 macOS 辅助功能授权
+
+**为什么过去每次升级都失效？** GitHub Actions 以前用 `codesign --sign -` 临时（Ad-hoc）签署 `kvm.app`，它的指定代码要求（Designated Requirement）绑定到当前版本的 CDHash；升级时哈希变化，macOS TCC 无法确认还是同一个有权访问辅助功能的程序。保持 Bundle ID 不变**不足以**解决此问题。
+
+**个人使用的新安装方式**：Mac DMG 根目录新增 `Install or Update kvm.command`。它会在 Mac 本机登录钥匙串**只创建一次**有效期十年的 `kvm Local Code Signing` 自签名代码签名身份，之后重复使用同一张证书和私钥；只设置**当前用户的 Code Signing 信任策略**（不修改 SSL 信任、不关闭 Gatekeeper/SIP，也不直接写 TCC 数据库）。将下载的 `kvm.app` 先复制到临时目录，以固定的 `dev.heavenknows.kvm` Bundle ID 和该证书指纹作为指定代码要求重新签名，验证后才替换 `/Applications/kvm.app`。
+
+**第一次迁移：**
+1. 完全退出 Mac 菜单栏上的旧版 kvm。
+2. 从本项目 Actions 下载并解压 `kvm-macos-arm64`，打开里面的 DMG。
+3. 打开终端执行 `bash "/Volumes/kvm/Install or Update kvm.command"`。首次会创建签名证书并可能请求钥匙串/管理员密码；不要使用 `sudo bash`。
+4. 打开 `/Applications/kvm.app`。从旧 Ad-hoc 签名迁移的**这一次**，可能还需要到「系统设置 → 隐私与安全性 → 辅助功能」重新勾选并重启应用。
+
+**未来每次更新**重复 1～3：使用 DMG 里的**安装/更新脚本**，**不要再将 app 从 DMG 拖到“应用程序”覆盖旧版**，否则会用回每版不同哈希的 CI Ad-hoc 签名，权限仍会失效。安装后的程序必须始终从 `/Applications/kvm.app` 启动，避免路径变化影响系统权限身份识别。
+
+可运行 `bash "/Volumes/kvm/Install or Update kvm.command" --check` 查看证书指纹和已安装 app 的指定要求。**请保留钥匙串中的签名证书及其私钥**；若丢失、过期或更换 Mac，须重新建立身份并完成一次授权。
+
+**限制与安全边界：** 这只为**本机个人使用**建立可跨版本复用的代码身份，无法让 macOS 自动授予辅助功能权限，也**不是** Apple Developer ID、公证或 Gatekeeper 认可的开发者签名。首次或后续下载文件仍可能出现正常的安全确认；这不能在没有 Apple Developer ID 公证的条件下消除。整个过程不会把私钥导出到 GitHub 或其他主机。CI 使用的临时自签名身份仅用于安装器引导测试，**下载的 DMG 本身仍是 Ad-hoc**，必须运行本机安装器才能保留授权。需要 Mac 实机验证升级后的 TCC 状态。
 
 ## beta.16：Windows 托盘常驻、干净界面、拖动松手吸附
 
@@ -123,7 +141,7 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 打开 GitHub 仓库的 **Actions → Build kvm (Windows + macOS) → 最近一次运行 → Artifacts** 下载。
 
 - **Windows**：解压 GitHub 下载的 ZIP，直接双击 `kvm.exe`；已关闭 Windows 控制台窗口。点击窗口右上角关闭键会缩入系统托盘，托盘菜单选择「打开设置」重新显示窗口，选择「退出 kvm」才彻底关闭程序。
-- **macOS**：解压 GitHub Artifact ZIP，双击里面的 `.dmg`，将 `kvm.app` 拖到「应用程序」，然后从 Finder 启动。不需要 Terminal，**启动时会显示设置窗口**（避免菜单栏图标不可见时完全无法操作）。平时不占用 Dock，在屏幕顶部菜单栏保留 kvm 图标；关闭设置窗口后继续在后台运行，点击图标 →「打开设置」可以再次打开窗口。「退出 kvm」才会结束进程。如果菜单栏图标创建失败，窗口会显示警告，关闭窗口将正常退出。**当前不包含开机自动启动**。
+- **macOS**：解压 GitHub Artifact ZIP，双击里面的 `.dmg`，在终端运行 `bash "/Volumes/kvm/Install or Update kvm.command"`，使用本机稳定签名安装到 `/Applications/kvm.app`，然后从 Finder 启动。**后续更新必须重复使用这个安装器，而不是拖动覆盖 app**。不需要 Terminal，**启动时会显示设置窗口**（避免菜单栏图标不可见时完全无法操作）。平时不占用 Dock，在屏幕顶部菜单栏保留 kvm 图标；关闭设置窗口后继续在后台运行，点击图标 →「打开设置」可以再次打开窗口。「退出 kvm」才会结束进程。如果菜单栏图标创建失败，窗口会显示警告，关闭窗口将正常退出。**当前不包含开机自动启动**。
 - macOS CI 使用 **临时（ad-hoc）代码签名**而不是 Apple Developer ID 签名，也没有 Apple 公证。Gatekeeper 仍可能阻止打开，首次请在「系统设置 → 隐私与安全性」审核该来自可信仓库的构建；全局键鼠控制还需要辅助功能 / 输入监控权限。
 - GitHub 的 Artifact 自身是 ZIP，因此现在下载只有**一个 ZIP 外层**；Windows ZIP 内直接是 exe，Mac ZIP 内直接是 dmg，不再套第二层 ZIP/tar.gz。
 
