@@ -22,9 +22,50 @@ fn bundle_from_executable(path:&Path)->Option<PathBuf>{
     Some(bundle.to_path_buf())
 }
 
-pub fn installed()->bool{
-    bundle_from_executable(&std::env::current_exe().unwrap_or_default())
-        .is_some_and(|p|p==Path::new(INSTALL_PATH))
+/// Drag-to-Applications must work for a first installation. The first
+/// launch of a GitHub (ad-hoc) build offers one-time local signing *after*
+/// it has been copied. Later releases preserve that identity via the updater.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum InstallMode{
+    InstallFromDmg,
+    FinishFirstInstall,
+    Update,
+}
+
+fn classify(bundle:&Path,designated:&str)->InstallMode{
+    if bundle!=Path::new(INSTALL_PATH){
+        return InstallMode::InstallFromDmg;
+    }
+    // Our personal installer pins the stable certificate in the app's DR.
+    // A directly dragged CI artifact has a version-specific CDHash DR.
+    if designated.contains("designated =>") &&
+        designated.contains("identifier") &&
+        designated.contains("certificate leaf ="){
+        InstallMode::Update
+    }else{
+        InstallMode::FinishFirstInstall
+    }
+}
+
+fn installed_designated_requirement(bundle:&Path)->String{
+    let output=Command::new("/usr/bin/codesign")
+        .arg("-d").arg("-r-").arg(bundle).output();
+    match output{
+        Ok(out) if out.status.success()=>
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        _=>String::new(),
+    }
+}
+
+pub fn mode()->InstallMode{
+    static MODE:std::sync::OnceLock<InstallMode>=std::sync::OnceLock::new();
+    *MODE.get_or_init(||{
+        let bundle=bundle_from_executable(&std::env::current_exe().unwrap_or_default());
+        match bundle{
+            Some(path)=>classify(&path,&installed_designated_requirement(&path)),
+            None=>InstallMode::InstallFromDmg,
+        }
+    })
 }
 
 /// A native file picker. No Finder execution of the downloaded app or script.
@@ -58,12 +99,16 @@ pub fn start()->Result<(),String>{
     }
     let millis=SystemTime::now().duration_since(UNIX_EPOCH)
         .unwrap_or_default().as_millis();
-    let (source,staged_app_dir)=if bundle==Path::new(INSTALL_PATH) {
+    let (source,staged_app_dir)=if mode()==InstallMode::Update {
+        // Only an app with a stable designated requirement can update from
+        // a downloaded DMG. First-run ad-hoc installs always repair their own
+        // signature FIRST, even if already inside /Applications.
         (choose_dmg()?,None)
     }else{
-        // Gatekeeper App Translocation can unmount its randomized read-only
-        // location as soon as the first-run application quits. Clone this
-        // signed bundle BEFORE quitting, so the helper has a durable input.
+        // First launch from /Applications after a normal drag, or directly
+        // from a DMG: install the running version with a stable identity.
+        // Snapshot first: App Translocation and self-update can both cause
+        // the original bundle to disappear after process exit.
         let staging=std::env::temp_dir()
             .join(format!("kvm-source-{}-{millis}",std::process::id()));
         fs::create_dir(&staging).map_err(|e|format!("无法准备安装目录：{e}"))?;
@@ -112,5 +157,19 @@ mod tests{
             "/Volumes/kvm 1/kvm.app/Contents/MacOS/kvm")).unwrap(),
             PathBuf::from("/Volumes/kvm 1/kvm.app"));
         assert!(bundle_from_executable(Path::new("/tmp/kvm")).is_none());
+    }
+
+    #[test]
+    fn drag_first_install_offers_one_time_signing_then_future_updates(){
+        let installed=Path::new("/Applications/kvm.app");
+        let dmg=Path::new("/Volumes/kvm/kvm.app");
+        let adhoc="designated => cdhash H\"F00D\"";
+        let stable="designated => identifier \"dev.heavenknows.kvm\" and certificate leaf = H\"FEED\"";
+        assert_eq!(classify(dmg,adhoc),InstallMode::InstallFromDmg);
+        // IMPORTANT: drag-installing is supported and repairable.
+        assert_eq!(classify(installed,adhoc),InstallMode::FinishFirstInstall);
+        assert_eq!(classify(installed,""),InstallMode::FinishFirstInstall);
+        assert_eq!(classify(installed,stable),InstallMode::Update);
+        assert_eq!(classify(dmg,stable),InstallMode::InstallFromDmg);
     }
 }

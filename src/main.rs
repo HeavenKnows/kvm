@@ -725,13 +725,24 @@ impl KvmApp {
         #[cfg(target_os="macos")]
         {
             ui.add_space(12.0);
-            // Native macOS GUI update. A fresh DMG offers one-click install;
-            // an installed copy offers the OS-native DMG chooser.
-            if ui.button(if macos_update::installed(){
-                tr(lang,"安装更新包…","Install update…")
-            }else{
-                tr(lang,"安装到应用程序","Install to Applications")
-            }).clicked(){
+            // A normal Finder drag-to-Applications installs the downloaded
+            // ad-hoc bundle. Offer one-time signing after the drag, not a
+            // misleading "choose update DMG" picker on first launch.
+            let mode=macos_update::mode();
+            let label=match mode{
+                macos_update::InstallMode::InstallFromDmg=>
+                    tr(lang,"安装到应用程序","Install to Applications"),
+                macos_update::InstallMode::FinishFirstInstall=>
+                    tr(lang,"完成首次安装","Finish first installation"),
+                macos_update::InstallMode::Update=>
+                    tr(lang,"安装更新包…","Install update…"),
+            };
+            if mode==macos_update::InstallMode::FinishFirstInstall{
+                ui.label(tr(lang,
+                    "首次安装后完成一次签名设置，再授予辅助功能权限。",
+                    "Finish one-time signing setup before granting Accessibility."));
+            }
+            if ui.button(label).clicked(){
                 match macos_update::start(){
                     Ok(())=>{
                         self.persist_settings();

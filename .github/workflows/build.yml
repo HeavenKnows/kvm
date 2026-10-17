@@ -86,7 +86,7 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>21</string>
+            <key>CFBundleVersion</key><string>22</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
@@ -111,47 +111,48 @@ jobs:
           # grants across releases. Ship a self-contained LOCAL installer
           # that generates/reuses one key in the user's login keychain, then
           # re-signs each release with a stable designated requirement.
-          # Finder double-clicking an unnotarized .command script can trigger
-          # Gatekeeper's stricter *document* path; Apple documents this as a
-          # known issue. Bundle a plain .sh DATA file instead, executed by
-          # /bin/bash in Terminal. Do not offer a misleading drag-install link:
-          # doing so would overwrite the user's stable personal signature.
+          # The FIRST install retains standard Finder drag-to-Applications.
+          # On first run the app guides one-time local signing. Subsequent
+          # updates MUST use its in-app DMG picker to preserve TCC identity.
+          # Keep the optional plain .sh as a fallback (not a .command).
           mkdir -p dist/dmg-root
           mv "$APP" dist/dmg-root/kvm.app
+          ln -s /Applications "dist/dmg-root/Applications"
           cp scripts/macos-local-sign-install.sh "dist/dmg-root/install-kvm.sh"
           chmod 644 "dist/dmg-root/install-kvm.sh"
           cat > "dist/dmg-root/安装与更新 - READ ME.txt" <<'INSTRUCTIONS'
           kvm (macOS) 安装与更新 / Installation & Updates
 
-          首次安装：
-          1. 在 DMG 中打开 kvm.app。如果 macOS 阻止未公证应用，
-             可在确认来源后到“系统设置 → 隐私与安全性 → 仍要打开”
-             手动批准首次打开；不要关闭 Gatekeeper。
-          2. 在 kvm 的“概览”页点击“安装到应用程序”。
-          3. 根据系统提示批准登录钥匙串和管理员授权。
-             安装成功后新版 kvm 会从 /Applications/kvm.app 启动。
+          首次安装（支持 Finder 常规拖拽）：
+          1. 将本 DMG 的 kvm.app 拖到 Applications（应用程序）。
+          2. 从 /Applications/kvm.app 打开 kvm。
+          3. 在“概览”页点“完成首次安装”，使本机证书签名固定。
+             按提示完成系统管理员或钥匙串授权后会自动重新打开。
+          4. 之后再为 kvm 授予一次“辅助功能”权限。
+          如 macOS 拦截首次运行，可在确认来源可信后，按系统正常
+          安全批准流程打开；不要关闭 Gatekeeper。
 
-          以后更新：
-          1. 从 GitHub Actions 下载新的 DMG，无需双击其中的 App。
-          2. 在已安装的 kvm“概览”页点击“安装更新包…”并选择 DMG。
-          3. 程序自动退出旧版、签署并替换应用、打开新版。
-          不需要终端、双击脚本或拖拽覆盖 app。
+          今后升级：
+          1. 下载新的 DMG，不要直接拖拽覆盖已经安装的 kvm.app。
+          2. 打开旧版 kvm，点“安装更新包…”并选下载的 DMG。
+          3. 程序自动退出、重新签署、替换、启动新版；不需要终端。
+          直接拖拽覆盖会破坏已建立的稳定签名，可能重置辅助功能授权。
 
-          如首次因 Gatekeeper 完全无法打开，DMG 仍提供
-          install-kvm.sh 作为备用，可通过 /bin/bash 从终端执行；
-          它不是日常升级方式。首次更换代码身份可能再需授权一次。
-          没有开发者账号无法消除首次 Gatekeeper 安全确认。
-          如系统明确报告恶意软件，不应绕过告警。
+          从 DMG 直接打开新 kvm 时，也可点“安装到应用程序”。
+          若图形安装不可用，DMG 保留 install-kvm.sh 备用；
+          它不是常规更新步骤。
+          没有开发者身份时无法保证首次没有 Gatekeeper 确认。
+          若系统明确报告恶意软件，不要绕过该警告。
 
-          English: Open kvm.app from the DMG and click Install to Applications.
-          Subsequent updates: in the INSTALLED kvm app click Install update,
-          select the new downloaded DMG; installation/signing happen via the
-          native macOS authorization prompt. No Terminal for routine updates.
-          Only first-time Gatekeeper approval may be required.
+          English: For first installation, drag kvm.app to Applications.
+          Open the installed app, click Finish first installation once
+          to set up its stable local signature, then grant Accessibility.
+          For LATER UPDATES, open the installed kvm and click Install update,
+          choose the new DMG. Do not drag-replace after initial setup.
           INSTRUCTIONS
           test -f "dist/dmg-root/install-kvm.sh"
           test ! -e "dist/dmg-root/Install or Update kvm.command"
-          test ! -L "dist/dmg-root/Applications"
+          test "$(readlink dist/dmg-root/Applications)" = "/Applications"
           hdiutil create -volname "kvm" -srcfolder "dist/dmg-root" -ov -format UDZO \
             "dist/${{ matrix.artifact }}.dmg"
 
