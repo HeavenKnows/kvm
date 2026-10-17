@@ -113,7 +113,8 @@ NEXT="/Applications/.kvm-next.app";BACKUP="/Applications/.kvm-prev.app"
 [[ ! -e "$NEXT" && ! -e "$BACKUP" ]]||err "Previous install incomplete (.kvm-next or .kvm-prev)."
 say "Installing to $DEST (administrator password may be requested)."
 sudo /usr/bin/ditto "$TMP/kvm.app" "$NEXT"
-if ! sudo /usr/bin/codesign --verify --strict "$NEXT";then
+# Verify as the login user so validation sees the user-scoped signing trust.
+if ! /usr/bin/codesign --verify --strict "$NEXT";then
   sudo /bin/rm -rf "$NEXT";err "Copied app failed verification; old app unchanged."
 fi
 if [[ -e "$DEST" ]];then sudo /bin/mv "$DEST" "$BACKUP";fi
