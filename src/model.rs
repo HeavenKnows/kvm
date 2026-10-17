@@ -190,7 +190,8 @@ pub struct Settings {
     pub remote_display:usize,
     /// Multiplier for unaccelerated device-count deltas on the controller.
     pub mouse_speed:f32,
-    /// Wheel lines per 120 Windows Raw Input units; fractional wheels accumulate.
+    /// Pixel-based wheel gain; 1x is four macOS logical pixels per notch.
+    /// High-resolution wheel fractions accumulate between packets.
     pub scroll_speed:f32,
     /// On macOS, use native XButton events instead of Command+[ / Command+].
     pub side_buttons_native:bool,
@@ -228,7 +229,7 @@ pub fn load()->Settings {
             if !s.mouse_speed.is_finite() || !(0.5..=4.0).contains(&s.mouse_speed) {
                 s.mouse_speed=1.6;
             }
-            if !s.scroll_speed.is_finite() || !(1.0..=10.0).contains(&s.scroll_speed){
+            if !s.scroll_speed.is_finite() || !(0.1..=16.0).contains(&s.scroll_speed){
                 s.scroll_speed=3.0;
             }
             s
@@ -269,6 +270,10 @@ mod tests {
         assert_eq!(s.local_display,0);
         assert_eq!(s.remote_display,0);
         assert_eq!(s.mouse_speed,1.6);
+        assert_eq!(s.scroll_speed,3.0);
+        let old=serde_json::to_string(&s).unwrap();
+        let latest:Settings=serde_json::from_str(&old).unwrap();
+        assert_eq!(latest.scroll_speed,3.0);
     }
     #[test] fn vertical_offset_and_edge_transfer(){
         let local=Screen::new(1920,1080);

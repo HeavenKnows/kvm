@@ -466,8 +466,22 @@ impl KvmApp {
         let bounds=if matches!(self.settings.layout.side,Side::Left|Side::Right){
             (-rd.h+24)..=(ld.h-24)
         }else{(-rd.w+24)..=(ld.w-24)};
-        if ui.add(egui::Slider::new(&mut self.settings.layout.offset,bounds)
-                .text(tr(lang,"边缘偏移","Edge offset"))).changed(){
+        let before_offset=self.settings.layout.offset;
+        ui.horizontal_wrapped(|ui|{
+            ui.add(egui::Slider::new(&mut self.settings.layout.offset,bounds.clone())
+                .text(tr(lang,"边缘偏移","Edge offset")));
+            ui.add(egui::DragValue::new(&mut self.settings.layout.offset)
+                .range(bounds.clone()).speed(1.0).suffix(" px"));
+            if ui.button("−1 px").clicked(){
+                self.settings.layout.offset=self.settings.layout.offset.saturating_sub(1)
+                    .clamp(*bounds.start(),*bounds.end());
+            }
+            if ui.button("+1 px").clicked(){
+                self.settings.layout.offset=self.settings.layout.offset.saturating_add(1)
+                    .clamp(*bounds.start(),*bounds.end());
+            }
+        });
+        if self.settings.layout.offset!=before_offset{
             *self.state.layout.lock().unwrap()=self.settings.layout;
             self.persist_settings();
         }
@@ -720,16 +734,16 @@ impl KvmApp {
                     "Raw Input 不包含 Windows 系统鼠标加速，连接中也可调整。",
                     "Raw Input bypasses Windows acceleration; this updates live."));
                 ui.add_space(8.0);
-                ui.label(tr(lang,"远端滚轮速度（每格滚动行数）",
-                    "Remote wheel speed (lines per notch)"));
-                if ui.add(egui::Slider::new(&mut self.settings.scroll_speed,1.0..=10.0)
-                    .step_by(0.5).suffix("×")).changed(){
+                ui.label(tr(lang,"远端滚轮速度（像素级，1× ≈ 4 px/格）",
+                    "Remote wheel speed (pixel-level, 1x ≈ 4 px/notch)"));
+                if ui.add(egui::Slider::new(&mut self.settings.scroll_speed,0.1..=16.0)
+                    .step_by(0.1).suffix("×")).changed(){
                     self.state.set_scroll_speed(self.settings.scroll_speed);
                     self.persist_settings();
                 }
                 ui.small(tr(lang,
-                    "使用 Windows 原生滚轮增量并累积高精度小数；支持纵向和横向滚动。",
-                    "Uses native Windows wheel deltas with fractional accumulation; vertical and horizontal scrolling."));
+                    "设置实时生效。0.1× 可极慢滚动；小于 1 像素的滚轮增量会累计，支持纵向和横向滚动。",
+                    "Applies immediately. Use 0.1x for very slow scrolling; subpixel wheel deltas accumulate. Supports vertical and horizontal scrolling."));
             });
         }
     }
@@ -764,7 +778,7 @@ impl KvmApp {
             }
             if ui.button(tr(lang,"复制完整诊断","Copy full diagnostics")).clicked(){
                 let diagnostic=format!(
-                    "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nScroll speed: {:.1} lines/notch\nNetwork RTT: {:?} ms\nRTT peak: {} ms\nWheel packets: {}\nSide button events: {}\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
+                    "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nScroll speed: {:.1}x (4 px/notch at 1x)\nNetwork RTT: {:?} ms\nRTT peak: {} ms\nWheel packets: {}\nSide button events: {}\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
                     env!("CARGO_PKG_VERSION"),
                     std::env::consts::OS,
                     if self.settings.role_server{"receiver"}else{"controller"},

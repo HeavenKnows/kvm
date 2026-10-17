@@ -18,7 +18,7 @@ pub enum Wire {
     Back,
     Input(EventType),
     MoveBy { dx:i32, dy:i32 },
-    /// Signed scroll lines after controller-side WHEEL_DELTA normalization.
+    /// Signed logical-pixel scroll after controller-side WHEEL_DELTA normalization.
     Scroll { dx:i32, dy:i32 },
     /// Diagnostic probe for the encrypted LAN transport.
     Ping(u64),

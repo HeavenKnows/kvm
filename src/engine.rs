@@ -26,9 +26,10 @@ pub enum ClipboardUiJob {
 struct WheelScale {x:f32,y:f32}
 impl WheelScale {
     fn scale(&mut self,raw_x:i32,raw_y:i32,gain:f32)->(i32,i32) {
-        let gain=if gain.is_finite(){gain.clamp(1.0,10.0)}else{3.0};
+        let gain=if gain.is_finite(){gain.clamp(0.1,16.0)}else{3.0};
         fn axis(raw:i32,gain:f32,frac:&mut f32)->i32 {
-            let value=raw.clamp(-2400,2400) as f32 * gain/120.0 + *frac;
+            // 1x equals four macOS logical pixels per wheel notch.
+            let value=raw.clamp(-2400,2400) as f32 * gain/30.0 + *frac;
             let lines=value.trunc() as i32;
             *frac=value-lines as f32;
             lines
@@ -267,7 +268,7 @@ impl Shared {
         *self.motion_fraction.lock().unwrap()=MotionScale::default();
     }
     pub fn set_scroll_speed(&self,gain:f32){
-        self.scroll_gain.store(gain.clamp(1.0,10.0).to_bits(),Ordering::Relaxed);
+        self.scroll_gain.store(gain.clamp(0.1,16.0).to_bits(),Ordering::Relaxed);
         *self.scroll_fraction.lock().unwrap()=WheelScale::default();
     }
     pub fn native_motion_stopped(&self,error:String){
@@ -647,6 +648,14 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         }
                         }
                     }
+                    Wire::MacControlArrow(key) if shared.active.load(Ordering::Relaxed)=>{
+                        #[cfg(target_os="macos")]
+                        if let Err(e)=crate::native_keyboard::control_arrow(key,&pressed){
+                            shared.info(UiStatus::InputHookFailed(e));
+                        }
+                        #[cfg(not(target_os="macos"))]
+                        {let _=key;}
+                    }
                     Wire::Scroll{dx,dy} if shared.active.load(Ordering::Relaxed)=>{
                         if let Err(e)=native_cursor::scroll(dx,dy){
                             shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
@@ -915,7 +924,9 @@ fn capture(shared:Arc<Shared>) {
     let pressed=Arc::new(Mutex::new(HashSet::<Key>::new()));
     let skip_v=Arc::new(AtomicBool::new(false));
     let skip_f12=Arc::new(AtomicBool::new(false));
+    let skip_arrows=Arc::new(Mutex::new(HashSet::<Key>::new()));
     let p=pressed.clone(); let skip=skip_v.clone(); let skip_emergency=skip_f12.clone();
+    let workspace_keys=skip_arrows.clone();
     let me=Platform::local();
     let hook_shared=shared.clone();
     if let Err(e)=rdev::grab(move |event| {
@@ -923,6 +934,7 @@ fn capture(shared:Arc<Shared>) {
             p.lock().unwrap().clear();
             skip.store(false,Ordering::SeqCst);
             skip_emergency.store(false,Ordering::SeqCst);
+            workspace_keys.lock().unwrap().clear();
             return Some(event);
         }
         let et=event.event_type.clone();
@@ -939,6 +951,16 @@ fn capture(shared:Arc<Shared>) {
                     return None;
                 }
                 let chord=p.lock().unwrap().iter().any(|&v|input::primary(v,me));
+                // macOS Space/Mission Control uses Control+Arrow; normal
+                // Windows Ctrl+letters continue to map to Command+letters.
+                if remote && me==Platform::Windows
+                    && *hook_shared.target.lock().unwrap()==Platform::Mac
+                    && hook_shared.remap.load(Ordering::Relaxed)
+                    && chord && input::mac_control_arrow(k){
+                    workspace_keys.lock().unwrap().insert(k);
+                    hook_shared.send(Wire::MacControlArrow(k));
+                    return None;
+                }
                 if chord && (k==Key::KeyC || k==Key::KeyX){
                     *hook_shared.owner.lock().unwrap()=if remote {Owner::Remote} else {Owner::Local};
                 }
@@ -962,6 +984,7 @@ fn capture(shared:Arc<Shared>) {
             }
             EventType::KeyRelease(k)=>{
                 p.lock().unwrap().remove(&k);
+                if workspace_keys.lock().unwrap().remove(&k){return None;}
                 if k==Key::KeyV && skip.swap(false,Ordering::SeqCst){return None;}
                 if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
             }
@@ -1051,11 +1074,15 @@ mod tests {
     }
     #[test] fn precision_wheel_and_direction(){
         let mut s=WheelScale::default();
-        assert_eq!(s.scale(0,30,3.0),(0,0));
-        assert_eq!(s.scale(0,30,3.0),(0,1));
-        assert_eq!(s.scale(0,30,3.0),(0,1));
-        assert_eq!(s.scale(0,30,3.0),(0,1));
-        assert_eq!(s.scale(-120,120,4.0),(-4,4));
+        assert_eq!(s.scale(0,30,3.0),(0,3));
+        assert_eq!(s.scale(0,30,3.0),(0,3));
+        assert_eq!(s.scale(-120,120,4.0),(-16,16));
+        let mut fine=WheelScale::default();
+        assert_eq!(fine.scale(0,120,0.1),(0,0));
+        assert_eq!(fine.scale(0,120,0.1),(0,0));
+        assert_eq!(fine.scale(0,120,0.1),(0,1));
+        let mut single=WheelScale::default();
+        assert_eq!(single.scale(0,120,1.0),(0,4));
     }
     #[test] fn paste_on_demand_routing(){
         assert_eq!(paste_action(true,Owner::Local,true),PasteAction::SendLocalClipboard);

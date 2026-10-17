@@ -114,10 +114,11 @@ mod mac {
     pub fn scroll(x:i32,y:i32)->Result<(),String>{
         if x==0 && y==0 {return Ok(());}
         if !trusted(){return Err("macOS Accessibility permission is not granted".into());}
-        // kCGScrollEventUnitLine=1, wheel1 vertical, wheel2 horizontal.
-        // Raw Windows delta is normalized by the controller beforehand.
-        let event=unsafe{CGEventCreateScrollWheelEvent(std::ptr::null(),1,2,
-            y.clamp(-50,50),x.clamp(-50,50))};
+        // kCGScrollEventUnitPixel=0 (not Line=1): let very small
+        // controller multipliers produce smooth, fractional wheel movement.
+        // The controller accumulated subpixel deltas before transmission.
+        let event=unsafe{CGEventCreateScrollWheelEvent(std::ptr::null(),0,2,
+            y.clamp(-240,240),x.clamp(-240,240))};
         if event.is_null(){return Err("Cannot create macOS scroll event".into());}
         unsafe{CGEventPost(0,event);CFRelease(event);}
         Ok(())
