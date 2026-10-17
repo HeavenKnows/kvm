@@ -203,6 +203,13 @@ impl Default for Settings {
 pub fn config_path()->Option<std::path::PathBuf> {
     dirs::config_dir().map(|p|p.join("kvm").join("settings.json"))
 }
+/// Use the receiver role for a fresh Mac installation, while preserving
+/// explicitly saved user roles (including Mac controller mode).
+pub fn fresh_install_defaults(platform:Platform)->Settings {
+    let mut settings=Settings::default();
+    if platform==Platform::Mac {settings.role_server=true;}
+    settings
+}
 pub fn load()->Settings {
     // Keep existing settings for users upgrading from CrossKey: if no kvm config
     // exists, read the old file and save into the kvm directory on next change.
@@ -218,7 +225,7 @@ pub fn load()->Settings {
             }
             s
         })
-        .unwrap_or_default()
+        .unwrap_or_else(||fresh_install_defaults(Platform::local()))
 }
 pub fn save(s:&Settings){
     if let Some(p)=config_path(){
@@ -236,6 +243,14 @@ mod tests {
         assert!(l.entering(1919,200,a,b));
         assert_eq!(l.entry(1919,200,a,b),(3,100));
         assert!(!l.entering(1919,20,a,b));
+    }
+    #[test] fn fresh_mac_install_starts_as_receiver(){
+        let mac=fresh_install_defaults(Platform::Mac);
+        let windows=fresh_install_defaults(Platform::Windows);
+        assert!(mac.role_server);
+        assert!(mac.auto_start_receiver);
+        assert!(!windows.role_server);
+        assert!(windows.auto_start_receiver);
     }
     #[test] fn backwards_compatible_settings(){
         let old=r#"{"role_server":false,"address":"192.168.1.2:24881","secret":"","layout":{"side":"Right","offset":0},"remap":true,"clipboard":true}"#;

@@ -83,6 +83,15 @@ fn side_name(side: Side, lang: Language) -> &'static str {
     }
 }
 
+/// Valid Noise-PSK material must be 32 hexadecimal characters. Return
+/// whether a new key was generated so the caller can persist it immediately.
+fn ensure_pairing_secret(settings:&mut Settings)->bool{
+    if settings.secret.len()==32 && settings.secret.bytes().all(|b|b.is_ascii_hexdigit()){
+        return false;
+    }
+    settings.secret=generate_secret();
+    true
+}
 fn generate_secret() -> String {
     use rand::RngCore;
     let mut buf = [0_u8;16];
@@ -192,7 +201,13 @@ struct KvmApp {
 }
 impl KvmApp {
     fn new(mut settings: Settings) -> Self {
-        if settings.secret.len() != 32 { settings.secret = generate_secret(); }
+        // Previously this secret was generated in RAM and *not saved* until
+        // some unrelated setting changed. Restarting then silently rotated
+        // the receiver PSK, so TCP connected but pairing immediately failed.
+        if ensure_pairing_secret(&mut settings) && !cfg!(test) {
+            model::save(&settings);
+            launch_mark("pairing-key-generated-and-persisted");
+        }
         // Nonblocking initialization: do not call the OS display enumeration
         // or interface scanner from the eframe app-creation callback.
         launch_mark("shared-start");
@@ -463,6 +478,16 @@ impl KvmApp {
                     }
                 });
                 self.receiver_addresses(ui,lang);
+                if !started {
+                    ui.colored_label(egui::Color32::from_rgb(236,182,78),
+                        tr(lang,
+                            "接收服务尚未监听。请点击下方「启动接收端」，否则 Windows 会被拒绝连接。",
+                            "Receiver is not listening. Click Start receiver below or Windows connections will be refused."));
+                }else if !connected{
+                    ui.small(tr(lang,
+                        "接收端已启动；状态应显示等待连接。如出现端口占用错误，请先退出其他旧版 kvm。",
+                        "Receiver started. Status should read Waiting. If the port is in use, quit other older kvm instances."));
+                }
                 #[cfg(target_os="macos")]
                 if !native_cursor::accessibility_trusted(){
                     ui.colored_label(egui::Color32::YELLOW,tr(lang,
@@ -597,11 +622,17 @@ impl KvmApp {
                 });
                 ui.horizontal_wrapped(|ui|{
                     ui.label(tr(lang,"配对密钥","Pairing key"));
-                    if ui.button(tr(lang,"重新生成密钥","Regenerate pairing key")).clicked(){
+                    if ui.add_enabled(!self.state.started.load(Ordering::SeqCst),
+                        egui::Button::new(tr(lang,"重新生成密钥","Regenerate pairing key"))).clicked(){
                         self.settings.secret=generate_secret();
                         self.persist_settings();
                     }
                 });
+                if self.state.started.load(Ordering::SeqCst){
+                    ui.small(tr(lang,
+                        "正在监听时不能更换密钥；先停止接收，修改后重新启动，避免界面密钥与实际网络密钥不一致。",
+                        "The pairing key is locked while listening. Stop receiver first, then change the key and restart to keep the displayed key in sync."));
+                }
                 ui.small(tr(lang,"端口和密钥变更后，需要重启接收端并更新控制端配置。",
                     "After changing the port or key, restart the receiver and update the controller."));
             });
@@ -905,6 +936,18 @@ mod cjk_font_tests{
 #[cfg(test)]
 mod ui_deadlock_tests {
     use super::*;
+    #[test]
+    fn generated_pairing_key_is_valid_and_stable(){
+        let mut s=Settings::default();
+        assert!(ensure_pairing_secret(&mut s));
+        assert_eq!(s.secret.len(),32);
+        let initial=s.secret.clone();
+        assert!(!ensure_pairing_secret(&mut s));
+        assert_eq!(s.secret,initial);
+        s.secret="not-a-hex-key".into();
+        assert!(ensure_pairing_secret(&mut s));
+        assert_eq!(s.secret.len(),32);
+    }
     #[test]
     fn controller_layout_first_full_frame_completes() {
         let (tx,rx)=mpsc::channel();
