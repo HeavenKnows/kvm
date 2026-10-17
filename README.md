@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.22，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.23，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -56,6 +56,16 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **侧键**：Windows 的 XBUTTON1/XBUTTON2 会跨机传输。Mac 默认把侧键按下映射为 `⌘[`（后退）和 `⌘]`（前进）；接收端「偏好设置 → 鼠标侧键」可改为原生 Mouse Button 4/5。鼠标厂商专有的 Windows 宏、驱动自定义组合键并不会自动同步到 Mac，必须由目标系统或本工具显式映射。
 - **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
 - **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
+
+## beta.23：Mac 应用内在线检查、下载和安装更新
+
+现在**不需要手动下载新版 DMG**。首次安装仍是从 DMG 拖拽 `kvm.app` 到「应用程序」，打开后点击一次「完成首次安装」，使用本机长期签名证书固定应用身份，然后授权辅助功能。
+
+**后续更新**：打开已安装的 kvm，在「概览」点击「检查在线更新」。发现更高版本后点击「下载并安装 v…」；程序从项目的**公开 GitHub Releases** 下载官方 `kvm-macos-arm64.dmg` 到临时目录、按 GitHub Release Asset SHA-256（如果 API 提供）校验，交给原有签名安装器验证 DMG 中的 `kvm.app` 原始代码签名，并使用 Mac 钥匙串**原来的同一张个人证书**重新签署并安装。程序自动退出旧版、替换安装并打开新版；下载的临时 DMG 安装完成后清理。若想使用已下载的 DMG，仍可点击「从本地 DMG 更新…」。
+
+**自动发布**：Windows x64、Mac Apple Silicon 两个 CI 任务都通过后，新增 `publish` 任务，将两个构建包和 SHA-256 校验文件发布为公开的 GitHub Releases 预发布版。检测新版本采用 Releases 列表 API（**包含 beta 预发布版**），不使用会过滤预发布版的 `releases/latest`。只接受 `HeavenKnows/kvm` 同项目的精确 GitHub 下载链接，没有额外的下载服务或账号授权。网络请求和下载在后台线程进行，不阻塞主界面。
+
+**版本过渡**：beta.22 及更早版本还没有在线更新功能，所以要**最后一次手动升级到 beta.23**；之后的 beta.24 等版本可以从应用内完成更新。没有付费 Apple Developer ID，首次安全批准仍可能出现；应用内签名和安装的钥匙串流程需 Mac 实机验证。
 
 ## beta.22：恢复 macOS 首次拖拽安装，明确区分首次签名与日常更新
 

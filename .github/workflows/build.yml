@@ -86,7 +86,7 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>22</string>
+            <key>CFBundleVersion</key><string>23</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
@@ -173,3 +173,53 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}.dmg
           if-no-files-found: error
+
+  # GitHub Actions artifacts are not stable public download URLs. Publish
+  # both OS packages ONLY after both platform jobs have passed and uploaded.
+  # Release assets can then be fetched by the running app without a GitHub
+  # login or a manual DMG download.
+  publish:
+    name: Publish beta release
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Download tested packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: kvm-*
+          path: release-files
+          merge-multiple: true
+
+      - name: Prepare versioned release
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] ||
+            { echo "Unsupported release version: $version" >&2; exit 1; }
+          test -s release-files/kvm-macos-arm64.dmg
+          test -s release-files/kvm.exe
+          cd release-files
+          sha256sum kvm-macos-arm64.dmg kvm.exe > SHA256SUMS
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish public assets after successful builds
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: kvm ${{ steps.version.outputs.tag }}
+          prerelease: true
+          draft: false
+          generate_release_notes: true
+          files: |
+            release-files/kvm-macos-arm64.dmg
+            release-files/kvm.exe
+            release-files/SHA256SUMS
+          fail_on_unmatched_files: true

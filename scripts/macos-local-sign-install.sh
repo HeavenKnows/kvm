@@ -35,6 +35,15 @@ clean(){
   if [[ "${KVM_INSTALL_SCRIPT_COPY:-}" == 1 && "$GUI" == 1 ]];then
     rm -f -- "$0"
   fi
+  # Remove downloaded DMG only after installation/unmount has completed.
+  if [[ "$GUI" == 1 && -n "${KVM_AUTODOWNLOAD_DMG:-}" ]];then
+    downloaded="${KVM_AUTODOWNLOAD_DMG%/}"
+    download_temp_root="${TMPDIR:-/tmp}"
+    if [[ "${downloaded##*/}" == kvm-update-*.dmg &&
+          "${downloaded%/*}" == "${download_temp_root%/}" ]];then
+      /bin/rm -f -- "$downloaded"
+    fi
+  fi
   # Clean only the temporary bundle snapshot prepared by macos_update.rs.
   # Never accept an arbitrary directory to delete.
   if [[ "$GUI" == 1 && -n "${KVM_STAGED_APP_DIRECTORY:-}" ]];then

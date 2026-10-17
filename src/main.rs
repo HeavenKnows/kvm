@@ -324,6 +324,14 @@ struct KvmApp {
     tray_attempted:bool,
     #[cfg(target_os="macos")]
     mac_update_error:Option<String>,
+    #[cfg(target_os="macos")]
+    mac_update_check_rx:Option<Receiver<Result<Option<macos_update::RemoteRelease>,String>>>,
+    #[cfg(target_os="macos")]
+    mac_update_download_rx:Option<Receiver<Result<std::path::PathBuf,String>>>,
+    #[cfg(target_os="macos")]
+    mac_update_latest:Option<macos_update::RemoteRelease>,
+    #[cfg(target_os="macos")]
+    mac_update_busy_message:Option<String>,
     #[cfg(target_os="windows")]
     win_tray:Option<windows_tray::WindowsTray>,
     #[cfg(target_os="windows")]
@@ -424,6 +432,14 @@ impl KvmApp {
             tray_attempted:false,
             #[cfg(target_os="macos")]
             mac_update_error:None,
+            #[cfg(target_os="macos")]
+            mac_update_check_rx:None,
+            #[cfg(target_os="macos")]
+            mac_update_download_rx:None,
+            #[cfg(target_os="macos")]
+            mac_update_latest:None,
+            #[cfg(target_os="macos")]
+            mac_update_busy_message:None,
             #[cfg(target_os="windows")]
             win_tray:None,
             #[cfg(target_os="windows")]
@@ -735,7 +751,7 @@ impl KvmApp {
                 macos_update::InstallMode::FinishFirstInstall=>
                     tr(lang,"完成首次安装","Finish first installation"),
                 macos_update::InstallMode::Update=>
-                    tr(lang,"安装更新包…","Install update…"),
+                    tr(lang,"从本地 DMG 更新…","Update from local DMG…"),
             };
             if mode==macos_update::InstallMode::FinishFirstInstall{
                 ui.label(tr(lang,
@@ -750,6 +766,43 @@ impl KvmApp {
                         std::process::exit(0);
                     },
                     Err(error)=>self.mac_update_error=Some(error),
+                }
+            }
+            if mode==macos_update::InstallMode::Update {
+                ui.add_space(5.0);
+                let busy=self.mac_update_check_rx.is_some() ||
+                    self.mac_update_download_rx.is_some();
+                if let Some(release)=&self.mac_update_latest{
+                    let release=release.clone();
+                    if ui.add_enabled(!busy,egui::Button::new(format!(
+                        "{} v{}",tr(lang,"下载并安装","Download and install"),
+                        release.version))).clicked(){
+                        let (tx,rx)=mpsc::channel();
+                        self.mac_update_download_rx=Some(rx);
+                        self.mac_update_busy_message=Some(tr(lang,
+                            "正在下载新版…","Downloading update…").into());
+                        self.mac_update_error=None;
+                        let ctx=ui.ctx().clone();
+                        std::thread::spawn(move||{
+                            let _=tx.send(macos_update::download_release(&release));
+                            ctx.request_repaint();
+                        });
+                    }
+                }else if ui.add_enabled(!busy,egui::Button::new(
+                    tr(lang,"检查在线更新","Check for updates"))).clicked(){
+                    let (tx,rx)=mpsc::channel();
+                    self.mac_update_check_rx=Some(rx);
+                    self.mac_update_busy_message=Some(tr(lang,
+                        "正在检查更新…","Checking for updates…").into());
+                    self.mac_update_error=None;
+                    let ctx=ui.ctx().clone();
+                    std::thread::spawn(move||{
+                        let _=tx.send(macos_update::check_latest());
+                        ctx.request_repaint();
+                    });
+                }
+                if let Some(message)=&self.mac_update_busy_message{
+                    ui.label(message);
                 }
             }
             if let Some(error)=&self.mac_update_error{
@@ -1077,6 +1130,66 @@ impl eframe::App for KvmApp {
             self.auto_start_waiting=false;
             launch_mark("receiver-auto-start");
             engine::start_server(self.state.clone(),self.settings.clone());
+        }
+        #[cfg(target_os="macos")]
+        {
+            // Poll nonblocking download/check workers. No HTTP, hashing, or
+            // file copying may run inside an egui frame.
+            if let Some(rx)=&self.mac_update_check_rx{
+                match rx.try_recv(){
+                    Ok(result)=>{
+                        self.mac_update_check_rx=None;
+                        self.mac_update_busy_message=None;
+                        match result {
+                            Ok(Some(release))=>{
+                                self.mac_update_latest=Some(release);
+                                self.mac_update_error=None;
+                            },
+                            Ok(None)=>{
+                                self.mac_update_latest=None;
+                                self.mac_update_busy_message=Some("已经是最新版本 / Already up to date".into());
+                            },
+                            Err(e)=>self.mac_update_error=Some(e),
+                        }
+                    },
+                    Err(TryRecvError::Disconnected)=>{
+                        self.mac_update_check_rx=None;
+                        self.mac_update_busy_message=None;
+                        self.mac_update_error=Some("更新检查任务意外退出".into());
+                    },
+                    Err(TryRecvError::Empty)=>{},
+                }
+            }
+            if let Some(rx)=&self.mac_update_download_rx{
+                match rx.try_recv(){
+                    Ok(result)=>{
+                        self.mac_update_download_rx=None;
+                        self.mac_update_busy_message=None;
+                        match result{
+                            Ok(path)=>{
+                                match macos_update::install_downloaded(&path){
+                                    Ok(())=>{
+                                        self.persist_settings();
+                                        self.state.stop();
+                                        std::process::exit(0);
+                                    },
+                                    Err(e)=>{
+                                        let _=std::fs::remove_file(&path);
+                                        self.mac_update_error=Some(e);
+                                    }
+                                }
+                            },
+                            Err(e)=>self.mac_update_error=Some(e),
+                        }
+                    },
+                    Err(TryRecvError::Disconnected)=>{
+                        self.mac_update_download_rx=None;
+                        self.mac_update_busy_message=None;
+                        self.mac_update_error=Some("更新下载任务意外退出".into());
+                    },
+                    Err(TryRecvError::Empty)=>{},
+                }
+            }
         }
         #[cfg(target_os="windows")]
         {

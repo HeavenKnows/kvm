@@ -85,11 +85,128 @@ fn choose_dmg()->Result<PathBuf,String>{
     Ok(path)
 }
 
+/// Published release metadata is public (no GitHub account or API token).
+/// Only the owner/repository's exact asset URL is accepted. All file content
+/// is re-checked by the existing signed installer before replacing the app.
+#[derive(Clone,Debug)]
+pub struct RemoteRelease{
+    pub version:String,
+    url:String,
+    digest:Option<String>,
+}
+const RELEASES_API:&str="https://api.github.com/repos/HeavenKnows/kvm/releases?per_page=20";
+const ASSET_NAME:&str="kvm-macos-arm64.dmg";
+
+fn asset_url(version:&str)->String{
+    format!("https://github.com/HeavenKnows/kvm/releases/download/v{version}/{ASSET_NAME}")
+}
+fn parse_releases(bytes:&[u8],current:&str)->Result<Option<RemoteRelease>,String>{
+    let current=semver::Version::parse(current)
+        .map_err(|e|format!("本机版本无效：{e}"))?;
+    if bytes.len()>2_000_000{return Err("更新列表过大".into());}
+    let releases:Vec<serde_json::Value>=serde_json::from_slice(bytes)
+        .map_err(|e|format!("无法读取版本列表：{e}"))?;
+    let mut best:Option<(semver::Version,RemoteRelease)>=None;
+    for release in releases {
+        if release.get("draft").and_then(|v|v.as_bool())!=Some(false){continue;}
+        let Some(tag)=release.get("tag_name").and_then(|v|v.as_str()) else{continue;};
+        let Some(version_text)=tag.strip_prefix('v') else{continue;};
+        let Ok(ver)=semver::Version::parse(version_text) else{continue;};
+        if ver<=current || best.as_ref().is_some_and(|(old,_)|ver<=*old){continue;}
+        let expected=asset_url(version_text);
+        let Some(asset)=release.get("assets").and_then(|v|v.as_array())
+            .and_then(|items|items.iter().find(|a|
+                a.get("name").and_then(|v|v.as_str())==Some(ASSET_NAME) &&
+                a.get("browser_download_url").and_then(|v|v.as_str())==Some(&expected)
+            )) else{continue;};
+        // GitHub's API may include an asset SHA-256 digest. Use it when
+        // available, but old API responses without a digest also work.
+        let digest=asset.get("digest").and_then(|v|v.as_str())
+            .and_then(|v|v.strip_prefix("sha256:"))
+            .filter(|v|v.len()==64 && v.bytes().all(|b|b.is_ascii_hexdigit()))
+            .map(|v|v.to_ascii_lowercase());
+        best=Some((ver,RemoteRelease{
+            version:version_text.to_owned(),url:expected,digest,
+        }));
+    }
+    Ok(best.map(|(_,r)|r))
+}
+
+pub fn check_latest()->Result<Option<RemoteRelease>,String>{
+    let out=Command::new("/usr/bin/curl")
+        .args(["--fail","--location","--silent","--show-error",
+            "--connect-timeout","6","--max-time","20",
+            "--proto","=https","--proto-redir","=https",
+            "--header","Accept: application/vnd.github+json",
+            "--header","User-Agent: kvm-macos-updater",
+            RELEASES_API])
+        .output().map_err(|e|format!("无法访问 GitHub：{e}"))?;
+    if !out.status.success(){
+        return Err(format!("无法获取更新：{}",String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    parse_releases(&out.stdout,env!("CARGO_PKG_VERSION"))
+}
+
+fn check_sha256(file:&Path,expected:&str)->Result<(),String>{
+    let result=Command::new("/usr/bin/shasum").arg("-a").arg("256")
+        .arg(file).output().map_err(|e|format!("校验工具不可用：{e}"))?;
+    if !result.status.success(){return Err("下载文件 SHA-256 校验失败".into());}
+    let digest=String::from_utf8_lossy(&result.stdout)
+        .split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    if digest!=expected{return Err("下载文件哈希不匹配，已拒绝安装".into());}
+    Ok(())
+}
+pub fn download_release(release:&RemoteRelease)->Result<PathBuf,String>{
+    // Do not trust arbitrary URLs returned by a modified API response.
+    if release.url!=asset_url(&release.version) ||
+        semver::Version::parse(&release.version).is_err(){
+        return Err("更新下载地址无效".into());
+    }
+    let millis=SystemTime::now().duration_since(UNIX_EPOCH)
+        .unwrap_or_default().as_millis();
+    let path=std::env::temp_dir().join(format!(
+        "kvm-update-{}-{millis}.dmg",std::process::id()));
+    let downloaded=Command::new("/usr/bin/curl")
+        .args(["--fail","--location","--silent","--show-error",
+            "--connect-timeout","10","--max-time","180",
+            "--proto","=https","--proto-redir","=https",
+            "--max-filesize","250000000",
+            "--header","User-Agent: kvm-macos-updater"])
+        .arg("--output").arg(&path).arg(&release.url)
+        .output().map_err(|e|format!("下载失败：{e}"))?;
+    if !downloaded.status.success(){
+        let _=fs::remove_file(&path);
+        return Err(format!("下载失败：{}",String::from_utf8_lossy(&downloaded.stderr).trim()));
+    }
+    let result=(||{
+        let len=fs::metadata(&path).map_err(|e|format!("下载文件不可读：{e}"))?.len();
+        if !(100_000..=250_000_000).contains(&len){
+            return Err("下载文件大小异常".into());
+        }
+        if let Some(digest)=&release.digest{check_sha256(&path,digest)?;}
+        Ok(path.clone())
+    })();
+    if result.is_err(){let _=fs::remove_file(&path);}
+    result
+}
+
 /// Spawns the OS updater AFTER copying its script outside the app bundle.
 /// Main process then quits, and the helper waits for our PID to disappear.
 /// The helper signs with the login-user identity and uses Apple's native
 /// administrator authorization dialog for the file install only.
 pub fn start()->Result<(),String>{
+    launch(None)
+}
+
+pub fn install_downloaded(path:&Path)->Result<(),String>{
+    if mode()!=InstallMode::Update {return Err("请先完成首次安装".into());}
+    if path.extension().is_none_or(|x|x!="dmg") || !path.is_file(){
+        return Err("下载的 DMG 文件不存在".into());
+    }
+    launch(Some(path))
+}
+
+fn launch(downloaded:Option<&Path>)->Result<(),String>{
     let exe=std::env::current_exe().map_err(|e|format!("无法读取应用位置：{e}"))?;
     let bundle=bundle_from_executable(&exe)
         .ok_or("请从 kvm.app 启动程序")?;
@@ -100,10 +217,9 @@ pub fn start()->Result<(),String>{
     let millis=SystemTime::now().duration_since(UNIX_EPOCH)
         .unwrap_or_default().as_millis();
     let (source,staged_app_dir)=if mode()==InstallMode::Update {
-        // Only an app with a stable designated requirement can update from
-        // a downloaded DMG. First-run ad-hoc installs always repair their own
-        // signature FIRST, even if already inside /Applications.
-        (choose_dmg()?,None)
+        // User-selected or automatically downloaded DMG. The installer
+        // authenticates the app signature before any in-place replacement.
+        (match downloaded{Some(dmg)=>dmg.to_path_buf(),None=>choose_dmg()?},None)
     }else{
         // First launch from /Applications after a normal drag, or directly
         // from a DMG: install the running version with a stable identity.
@@ -138,6 +254,7 @@ pub fn start()->Result<(),String>{
         .arg(&script_copy).arg("--gui").arg("--wait-pid")
         .arg(std::process::id().to_string()).arg(&source)
         .env("KVM_INSTALL_SCRIPT_COPY","1")
+        .env("KVM_AUTODOWNLOAD_DMG",downloaded.unwrap_or_else(||Path::new("")))
         .env("KVM_STAGED_APP_DIRECTORY",staged_app_dir.as_deref()
             .unwrap_or_else(||Path::new("")))
         .stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err_log))
@@ -159,6 +276,24 @@ mod tests{
         assert!(bundle_from_executable(Path::new("/tmp/kvm")).is_none());
     }
 
+    #[test]
+    fn releases_choose_newer_semver_even_if_old_or_malformed_entries_exist(){
+        let releases=serde_json::json!([
+            {"draft":false,"tag_name":"v0.5.0-beta.21","assets":[]},
+            {"draft":false,"tag_name":"v0.5.0-beta.25","assets":[{"name":"kvm-macos-arm64.dmg",
+             "browser_download_url":"https://evil.invalid/update.dmg"}]},
+            {"draft":false,"tag_name":"v0.5.0-beta.24","assets":[{"name":"kvm-macos-arm64.dmg",
+             "browser_download_url":"https://github.com/HeavenKnows/kvm/releases/download/v0.5.0-beta.24/kvm-macos-arm64.dmg",
+             "digest":format!("sha256:{}", "a".repeat(64))}]},
+            {"draft":false,"tag_name":"v0.5.0-beta.23","assets":[{"name":"kvm-macos-arm64.dmg",
+             "browser_download_url":"https://github.com/HeavenKnows/kvm/releases/download/v0.5.0-beta.23/kvm-macos-arm64.dmg"}]}
+        ]);
+        let data=serde_json::to_vec(&releases).unwrap();
+        let result=parse_releases(&data,"0.5.0-beta.22").unwrap().unwrap();
+        assert_eq!(result.version,"0.5.0-beta.24");
+        assert_eq!(result.digest.as_ref().unwrap(),&"a".repeat(64));
+        assert!(parse_releases(&data,"0.5.0-beta.26").unwrap().is_none());
+    }
     #[test]
     fn drag_first_install_offers_one_time_signing_then_future_updates(){
         let installed=Path::new("/Applications/kvm.app");
