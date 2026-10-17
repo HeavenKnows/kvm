@@ -15,6 +15,13 @@ fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
     }
 }
 
+/// AppKit pasteboard operations must run on the macOS GUI thread; sending
+/// requests here never holds any display or session lock while awaiting them.
+#[cfg(target_os="macos")]
+pub enum ClipboardUiJob {
+    Snapshot(mpsc::SyncSender<Result<Vec<u8>,String>>),
+    Install(Vec<u8>,mpsc::SyncSender<Result<(),String>>),
+}
 #[derive(Default)]
 struct MotionScale {x:f32,y:f32}
 impl MotionScale{
@@ -59,6 +66,10 @@ pub struct Shared {
     capture_started:AtomicBool,
     native_started:AtomicBool,
     paste_sender:Mutex<Option<SyncSender<()>>>,
+    #[cfg(target_os="macos")]
+    clipboard_ui_tx:Mutex<Option<mpsc::Sender<ClipboardUiJob>>>,
+    #[cfg(target_os="macos")]
+    clipboard_ui_ctx:Mutex<Option<eframe::egui::Context>>,
     pub clipboard:AtomicBool,
     pub remap:AtomicBool,
     owner:Mutex<Owner>,
@@ -96,6 +107,10 @@ impl Shared {
             rtt_ms:AtomicU64::new(u64::MAX),clock:Instant::now(),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
+            #[cfg(target_os="macos")]
+            clipboard_ui_tx:Mutex::new(None),
+            #[cfg(target_os="macos")]
+            clipboard_ui_ctx:Mutex::new(None),
             stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
             native_started:AtomicBool::new(false),
             clipboard:AtomicBool::new(s.clipboard),remap:AtomicBool::new(s.remap),
@@ -103,6 +118,46 @@ impl Shared {
             pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
             entry_local:Mutex::new((w/2,h/2)),out:Mutex::new(None),
         })
+    }
+    #[cfg(target_os="macos")]
+    pub fn set_clipboard_ui_sender(&self,tx:mpsc::Sender<ClipboardUiJob>){
+        *self.clipboard_ui_tx.lock().unwrap()=Some(tx);
+    }
+    #[cfg(target_os="macos")]
+    pub fn set_clipboard_context(&self,ctx:eframe::egui::Context){
+        *self.clipboard_ui_ctx.lock().unwrap()=Some(ctx);
+    }
+    #[cfg(target_os="macos")]
+    fn clipboard_gui(&self,job:ClipboardUiJob)->Result<(),String>{
+        let tx=self.clipboard_ui_tx.lock().unwrap().clone()
+            .ok_or("Clipboard GUI channel is not initialized")?;
+        tx.send(job).map_err(|_|"Clipboard GUI channel closed".to_string())?;
+        if let Some(ctx)=self.clipboard_ui_ctx.lock().unwrap().as_ref(){
+            ctx.request_repaint();
+        }
+        Ok(())
+    }
+    fn read_clipboard(&self)->Result<Vec<u8>,String>{
+        #[cfg(target_os="macos")]
+        {
+            let (tx,rx)=mpsc::sync_channel(1);
+            self.clipboard_gui(ClipboardUiJob::Snapshot(tx))?;
+            return rx.recv_timeout(Duration::from_secs(10))
+                .map_err(|e|format!("Clipboard GUI read timed out: {e}"))?;
+        }
+        #[cfg(not(target_os="macos"))]
+        {clipboard::snapshot()}
+    }
+    fn write_clipboard(&self,data:Vec<u8>)->Result<(),String>{
+        #[cfg(target_os="macos")]
+        {
+            let (tx,rx)=mpsc::sync_channel(1);
+            self.clipboard_gui(ClipboardUiJob::Install(data,tx))?;
+            return rx.recv_timeout(Duration::from_secs(10))
+                .map_err(|e|format!("Clipboard GUI write timed out: {e}"))?;
+        }
+        #[cfg(not(target_os="macos"))]
+        {clipboard::install(&data)}
     }
     pub fn local_desktop(&self)->display::Desktop{
         self.local_desktop.lock().unwrap().clone()
@@ -280,7 +335,7 @@ fn clipboard_send_packet(shared:&Shared,mut packet:Wire)->bool {
     false
 }
 fn send_clipboard_snapshot(shared:&Shared){
-    let bytes=match clipboard::snapshot(){
+    let bytes=match shared.read_clipboard(){
         Ok(data)=>data,
         Err(_)=>{shared.info(UiStatus::ClipboardUnavailable);return;}
     };
@@ -300,7 +355,7 @@ fn start_clipboard_inbound(shared:Arc<Shared>)->mpsc::Sender<clipboard::Incoming
         // the user has switched sides.
         let receiver=shared.is_receiver.load(Ordering::SeqCst);
         if shared.active.load(Ordering::SeqCst)!=receiver {return;}
-        match clipboard::install(&bytes){
+        match shared.write_clipboard(bytes){
             Ok(())=>{
                 if !receiver {*shared.owner.lock().unwrap()=Owner::Local;}
                 // Allow Finder/Explorer to observe the new pasteboard flavor.

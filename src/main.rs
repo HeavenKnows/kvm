@@ -218,6 +218,8 @@ struct KvmApp {
     #[cfg(target_os="macos")]
     font_rx:Option<Receiver<Option<(&'static str,Vec<u8>)>>>,
     #[cfg(target_os="macos")]
+    clipboard_job_rx:Receiver<engine::ClipboardUiJob>,
+    #[cfg(target_os="macos")]
     font_failed:bool,
     #[cfg(target_os="macos")]
     font_ready:bool,
@@ -268,6 +270,12 @@ impl KvmApp {
         });
         let auto_start_waiting=settings.role_server && settings.auto_start_receiver;
         #[cfg(target_os="macos")]
+        let clipboard_job_rx={
+            let (tx,rx)=mpsc::channel();
+            state.set_clipboard_ui_sender(tx);
+            rx
+        };
+        #[cfg(target_os="macos")]
         let font_rx={
             let (tx,rx)=mpsc::channel();
             std::thread::spawn(move||{
@@ -294,6 +302,8 @@ impl KvmApp {
             page:UiPage::Overview,
             #[cfg(target_os="macos")]
             font_rx,
+            #[cfg(target_os="macos")]
+            clipboard_job_rx,
             #[cfg(target_os="macos")]
             font_failed:false,
             #[cfg(target_os="macos")]
@@ -763,6 +773,23 @@ impl eframe::App for KvmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frames=self.frames.saturating_add(1);
         if self.frames==1{launch_mark("first-ui-frame");}
+        #[cfg(target_os="macos")]
+        {
+            if self.frames==1 {self.state.set_clipboard_context(ctx.clone());}
+            // Run NSPasteboard calls on the AppKit GUI thread, never in the
+            // receiver/network worker. Do not hold Shared mutexes here.
+            for _ in 0..4 {
+                match self.clipboard_job_rx.try_recv(){
+                    Ok(engine::ClipboardUiJob::Snapshot(reply))=>{
+                        let _=reply.send(clipboard::snapshot());
+                    }
+                    Ok(engine::ClipboardUiJob::Install(data,reply))=>{
+                        let _=reply.send(clipboard::install(&data));
+                    }
+                    Err(_)=>break,
+                }
+            }
+        }
         #[cfg(target_os="macos")]
         if self.frames>=6 {
             if let Some(rx)=self.font_rx.take(){
