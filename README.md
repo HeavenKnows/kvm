@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.14，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.15，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -55,6 +55,14 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **侧键**：Windows 的 XBUTTON1/XBUTTON2 会跨机传输。Mac 默认把侧键按下映射为 `⌘[`（后退）和 `⌘]`（前进）；接收端「偏好设置 → 鼠标侧键」可改为原生 Mouse Button 4/5。鼠标厂商专有的 Windows 宏、驱动自定义组合键并不会自动同步到 Mac，必须由目标系统或本工具显式映射。
 - **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
 - **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
+
+## beta.15：双向独立映射列表 / macOS Control+方向键系统注入
+
+- **设置界面**：分别列出「Windows → Mac」和「Mac → Windows」两张表，不再提供每行操作系统下拉框。两表的表头明确标注输入方（Windows 键盘 / Mac 键盘）与接收方（Mac 接收端 / Windows 接收端）。每张表可独立添加、启用、编辑、删除；原来的 `shortcut_mappings` JSON 兼容保留。预设都是可见配置，不存在隐藏转换规则；相同系统默认原样透传。
+- **Mac Control+方向键**：用户配置目标组合 **恰好** 为 `Ctrl+Left`/`Right`/`Up`/`Down` 时，在 macOS 接收端使用 `CGEventSourceStateHIDSystemState` 创建事件，以 `kCGHIDEventTap` 发送完整 Control 按下、方向键按下/释放、Control 释放的事件序列；方向键事件带上 `Control | SecondaryFn` **事件 flags**（不合成 Fn 键的按下/释放，防止意外 Dictation）。普通键盘快捷键和无匹配规则时的传输不改变。
+- **原因**：旧版在普通会话级事件源模拟快捷键，即便应用收到了，macOS Dock/Mission Control 也可能忽略 Control+方向键系统热键。使用 HID 级事件源的方式在部分较新 macOS 版本有实机成功案例，但**不保证所有 macOS 版本、系统设置或输入权限都能触发**。Mac 须启用「键盘快捷键 → 调度中心 → 向左/向右移动一个空间」，且至少有两个桌面。
+- **可验证的诊断**：控制端显示“快捷键匹配次数”，接收端显示“快捷键注入尝试 / 报错次数”，完整诊断信息亦包含这些计数，**不收集或记录用户输入的按键内容**。Mac CI 测试用 Core Graphics HID source 创建四个预期 keyboard events 并读回 key code/type/flags；此测试不会真的切换系统桌面。最终效果必须两端实机验证。
+- 如果 Mac 上**真实按下** Control+左右方向键也不切换空间，请先修正或启用 macOS Mission Control 快捷键设置；该问题不能通过 KVM 的按键转换解决。
 
 ## beta.14：修复 Apple Silicon 鼠标滚轮方向错误及跳页首
 

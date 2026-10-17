@@ -9,6 +9,13 @@ extern "C" {
     fn CGEventSetFlags(event:*mut c_void,flags:u64);
     fn CGEventSetType(event:*mut c_void,event_type:u32);
     fn CGEventPost(tap_location:u32,event:*mut c_void);
+    fn CGEventSourceCreate(state_id:i32)->*mut c_void;
+    #[cfg(test)]
+    fn CGEventGetFlags(event:*const c_void)->u64;
+    #[cfg(test)]
+    fn CGEventGetType(event:*const c_void)->u32;
+    #[cfg(test)]
+    fn CGEventGetIntegerValueField(event:*const c_void,field:u32)->i64;
 }
 #[link(name="CoreFoundation",kind="framework")]
 extern "C" { fn CFRelease(obj:*mut c_void); }
@@ -91,6 +98,61 @@ pub fn shortcut(key:Key)->Result<(),String>{
     post(key,false,1<<20)?;
     post(Key::MetaLeft,false,0)
 }
+/// Special macOS system-keyboard delivery for an EXPLICIT Control+Arrow
+/// mapping. This changes only the injection backend, not the user's table.
+/// Session-source CGEvents can reach applications but be ignored by Spaces.
+/// Use the HID-system event state and HID event tap; mark arrows with
+/// Control | secondaryFn as required by macOS desktop-navigation handling.
+/// No synthetic Fn key-down is ever emitted (avoids the Dictation shortcut).
+const SYSTEM_CTRL:u64=1<<18;
+const SYSTEM_FN:u64=1<<23;
+
+fn make_system_key_event(
+    source:*const c_void,key:Key,down:bool,mask:u64
+)->Result<*mut c_void,String>{
+    let code=keycode(key).ok_or_else(||format!("Unsupported system key: {key:?}"))?;
+    let event=unsafe{CGEventCreateKeyboardEvent(source,code,down)};
+    if event.is_null(){return Err(format!("Cannot construct HID system key event for {key:?}"));}
+    unsafe {
+        if is_modifier(key){CGEventSetType(event,12);}
+        CGEventSetFlags(event,mask);
+    }
+    Ok(event)
+}
+pub fn system_control_arrow(key:Key)->Result<(),String>{
+    if !matches!(key,Key::LeftArrow|Key::RightArrow|Key::UpArrow|Key::DownArrow){
+        return Err(format!("Not a macOS Control+Arrow shortcut: {key:?}"));
+    }
+    if !crate::native_cursor::accessibility_trusted(){
+        return Err("macOS Accessibility permission is not granted for system shortcuts".into());
+    }
+    // CGEventSourceStateHIDSystemState=1, kCGHIDEventTap=0.
+    // The same sequence from a session-level source can be ignored by Dock.
+    let source=unsafe{CGEventSourceCreate(1)};
+    if source.is_null(){return Err("Cannot create HID keyboard event source".into());}
+    let steps=[
+        (Key::ControlLeft,true,SYSTEM_CTRL),
+        (key,true,SYSTEM_CTRL|SYSTEM_FN),
+        (key,false,SYSTEM_CTRL|SYSTEM_FN),
+        (Key::ControlLeft,false,0),
+    ];
+    // Build the entire sequence before posting anything. If Quartz cannot
+    // allocate an event, never leave a synthetic Control modifier held.
+    let mut events=Vec::with_capacity(4);
+    for (key,down,mask) in steps {
+        match make_system_key_event(source,key,down,mask){
+            Ok(event)=>events.push(event),
+            Err(e)=>{
+                for event in events {unsafe{CFRelease(event);}}
+                unsafe{CFRelease(source);}
+                return Err(e);
+            }
+        }
+    }
+    for event in events {unsafe{CGEventPost(0,event);CFRelease(event);}}
+    unsafe{CFRelease(source);}
+    Ok(())
+}
 pub fn paste()->Result<(),String>{shortcut(Key::KeyV)}
 #[cfg(test)]
 mod tests {
@@ -108,6 +170,25 @@ mod tests {
         assert_eq!(keycode(Key::Unknown(1)),None);
         assert_eq!(keycode(Key::LeftArrow),Some(0x7B));
         assert_eq!(keycode(Key::RightArrow),Some(0x7C));
+    }
+    #[test]
+    fn system_spaces_key_events_use_hid_flags(){
+        let source=unsafe{CGEventSourceCreate(1)};
+        assert!(!source.is_null());
+        for (key,down,mask,event_type) in [
+            (Key::ControlLeft,true,SYSTEM_CTRL,12),
+            (Key::LeftArrow,true,SYSTEM_CTRL|SYSTEM_FN,10),
+            (Key::RightArrow,true,SYSTEM_CTRL|SYSTEM_FN,10),
+            (Key::LeftArrow,false,SYSTEM_CTRL|SYSTEM_FN,11),
+            (Key::ControlLeft,false,0,12),
+        ] {
+            let event=make_system_key_event(source,key,down,mask).unwrap();
+            assert_eq!(unsafe{CGEventGetFlags(event)},mask);
+            assert_eq!(unsafe{CGEventGetType(event)},event_type);
+            assert_eq!(unsafe{CGEventGetIntegerValueField(event,9)},keycode(key).unwrap() as i64);
+            unsafe{CFRelease(event);}
+        }
+        unsafe{CFRelease(source);}
     }
     #[test]
     fn modifier_key_up_keeps_other_side_pressed(){

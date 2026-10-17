@@ -136,6 +136,13 @@ impl Chord {
         if self.mods & META!=0{keys.push(Key::MetaLeft);}
         keys
     }
+    /// Execution backend only: a Control+Arrow TARGET rule uses the macOS
+    /// HID event source so Mission Control can recognize the synthetic chord.
+    /// This never creates an implicit mapping.
+    pub fn is_mac_system_control_arrow(self)->bool{
+        self.mods==CTRL && matches!(self.key,
+            Key::LeftArrow|Key::RightArrow|Key::UpArrow|Key::DownArrow)
+    }
     pub fn is_paste(self,os:Platform)->bool{
         self.key==Key::KeyV && self.native_primary(os)
     }
@@ -195,6 +202,15 @@ mod tests{
         assert_eq!(table.find(Platform::Windows,Platform::Mac,Key::KeyC,&held),
             Some(Chord::parse("Command+C").unwrap()));
         assert_eq!(table.find(Platform::Windows,Platform::Windows,Key::KeyC,&held),None);
+        for (key,target) in [
+            (Key::LeftArrow,"Ctrl+Left"),(Key::RightArrow,"Ctrl+Right"),
+            (Key::UpArrow,"Ctrl+Up"),(Key::DownArrow,"Ctrl+Down")
+        ]{
+            let mapped=table.find(Platform::Windows,Platform::Mac,key,&held);
+            assert_eq!(mapped,Some(Chord::parse(target).unwrap()));
+            assert!(mapped.unwrap().is_mac_system_control_arrow());
+        }
+        assert!(!Chord::parse("Command+Left").unwrap().is_mac_system_control_arrow());
         let empty=ShortcutTable::compile(&[]);
         assert!(empty.find(Platform::Windows,Platform::Mac,Key::KeyC,&held).is_none());
     }

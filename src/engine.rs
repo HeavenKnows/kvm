@@ -76,6 +76,10 @@ pub struct Shared {
     scroll_fraction:Mutex<WheelScale>,
     pub wheel_packets:AtomicU64,
     pub side_button_packets:AtomicU64,
+    /// Diagnostics only; no keystrokes or private typed content retained.
+    pub shortcuts_matched:AtomicU64,
+    pub shortcuts_injected:AtomicU64,
+    pub shortcuts_failed:AtomicU64,
     pub rtt_peak_ms:AtomicU64,
     pub rtt_ms:AtomicU64,
     clock:Instant,
@@ -128,6 +132,9 @@ impl Shared {
             scroll_gain:AtomicU32::new(s.scroll_speed.to_bits()),
             scroll_fraction:Mutex::new(WheelScale::default()),
             wheel_packets:AtomicU64::new(0),side_button_packets:AtomicU64::new(0),
+            shortcuts_matched:AtomicU64::new(0),
+            shortcuts_injected:AtomicU64::new(0),
+            shortcuts_failed:AtomicU64::new(0),
             rtt_ms:AtomicU64::new(u64::MAX),rtt_peak_ms:AtomicU64::new(0),
             clock:Instant::now(),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
@@ -384,16 +391,39 @@ fn perform_shortcut(chord:input::Chord,held:&HashSet<Key>)->Result<(),String>{
         pressed.remove(&modifier);
         capture(inject_key(modifier,false,&pressed),&mut first_error);
     }
-    let target_mods=chord.modifier_keys();
-    for &modifier in &target_mods {
-        pressed.insert(modifier);
-        capture(inject_key(modifier,true,&pressed),&mut first_error);
+    // A configured macOS Control+Arrow is a SYSTEM shortcut. Posting it
+    // with the ordinary session keyboard source works for apps but Dock
+    // frequently ignores it; use the HID-state source only for this
+    // explicit target, without adding an invisible remapping rule.
+    #[cfg(target_os="macos")]
+    if chord.is_mac_system_control_arrow(){
+        capture(crate::native_keyboard::system_control_arrow(chord.key),&mut first_error);
+    }else{
+        let target_mods=chord.modifier_keys();
+        for &modifier in &target_mods {
+            pressed.insert(modifier);
+            capture(inject_key(modifier,true,&pressed),&mut first_error);
+        }
+        capture(inject_key(chord.key,true,&pressed),&mut first_error);
+        capture(inject_key(chord.key,false,&pressed),&mut first_error);
+        for &modifier in target_mods.iter().rev(){
+            pressed.remove(&modifier);
+            capture(inject_key(modifier,false,&pressed),&mut first_error);
+        }
     }
-    capture(inject_key(chord.key,true,&pressed),&mut first_error);
-    capture(inject_key(chord.key,false,&pressed),&mut first_error);
-    for &modifier in target_mods.iter().rev(){
-        pressed.remove(&modifier);
-        capture(inject_key(modifier,false,&pressed),&mut first_error);
+    #[cfg(not(target_os="macos"))]
+    {
+        let target_mods=chord.modifier_keys();
+        for &modifier in &target_mods {
+            pressed.insert(modifier);
+            capture(inject_key(modifier,true,&pressed),&mut first_error);
+        }
+        capture(inject_key(chord.key,true,&pressed),&mut first_error);
+        capture(inject_key(chord.key,false,&pressed),&mut first_error);
+        for &modifier in target_mods.iter().rev(){
+            pressed.remove(&modifier);
+            capture(inject_key(modifier,false,&pressed),&mut first_error);
+        }
     }
     for &modifier in &restore {
         pressed.insert(modifier);
@@ -690,7 +720,9 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         }
                     }
                     Wire::Shortcut(chord) if shared.active.load(Ordering::Relaxed)=>{
+                        shared.shortcuts_injected.fetch_add(1,Ordering::Relaxed);
                         if let Err(e)=perform_shortcut(chord,&pressed){
+                            shared.shortcuts_failed.fetch_add(1,Ordering::Relaxed);
                             shared.info(UiStatus::InputHookFailed(e));
                         }
                     }
@@ -1023,6 +1055,7 @@ fn capture(shared:Arc<Shared>) {
                 }
                 if let Some(target_chord)=mapped {
                     ignored.lock().unwrap().insert(k);
+                    hook_shared.shortcuts_matched.fetch_add(1,Ordering::Relaxed);
                     hook_shared.send(Wire::Shortcut(target_chord));
                     return None;
                 }

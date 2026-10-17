@@ -195,6 +195,90 @@ fn section_card<R>(ui:&mut egui::Ui,title:&str,render:impl FnOnce(&mut egui::Ui)
         }).inner
 }
 
+/// Two fixed-direction tables. Never ask the user to choose the OS on each
+/// row: column headers identify which keyboard is pressed and which receives
+/// the resulting event. The underlying persisted list stays backward compatible.
+fn shortcut_mapping_group_ui(
+    ui:&mut egui::Ui,
+    rules:&mut Vec<input::ShortcutMapping>,
+    from_os:model::Platform,
+    lang:Language,
+)->bool {
+    ui.push_id(("shortcut-group",from_os==model::Platform::Windows),|ui|{
+        let windows_to_mac=from_os==model::Platform::Windows;
+        ui.heading(if windows_to_mac{
+            tr(lang,"Windows → Mac 快捷键","Windows → Mac shortcuts")
+        }else{
+            tr(lang,"Mac → Windows 快捷键","Mac → Windows shortcuts")
+        });
+        ui.small(if windows_to_mac{
+            tr(lang,"按下 Windows 键盘时，将左列组合键映射为右列 Mac 快捷键。",
+                "Press on Windows; the right column is sent to Mac.")
+        }else{
+            tr(lang,"按下 Mac 键盘时，将左列组合键映射为右列 Windows 快捷键。",
+                "Press on Mac; the right column is sent to Windows.")
+        });
+        let mut changed=false;
+        let mut remove=None;
+        egui::ScrollArea::vertical().max_height(315.0)
+            .id_salt("shortcut-scroller").show(ui,|ui|{
+                egui::Grid::new("shortcut-grid").striped(true).min_col_width(0.0)
+                    .spacing([10.0,7.0]).show(ui,|ui|{
+                    ui.strong(tr(lang,"启用","On"));
+                    ui.strong(if windows_to_mac{
+                        tr(lang,"Windows 输入快捷键","Windows input shortcut")
+                    }else{
+                        tr(lang,"Mac 输入快捷键","Mac input shortcut")
+                    });
+                    ui.strong(if windows_to_mac{
+                        tr(lang,"Mac 接收端快捷键","Mac receiver shortcut")
+                    }else{
+                        tr(lang,"Windows 接收端快捷键","Windows receiver shortcut")
+                    });
+                    ui.strong(tr(lang,"操作","Action"));
+                    ui.end_row();
+                    for (index,rule) in rules.iter_mut().enumerate(){
+                        if rule.from_os!=from_os{continue;}
+                        changed|=ui.checkbox(&mut rule.enabled,"").changed();
+                        changed|=ui.add(egui::TextEdit::singleline(&mut rule.source)
+                            .desired_width(145.0)).changed();
+                        changed|=ui.add(egui::TextEdit::singleline(&mut rule.target)
+                            .desired_width(145.0)).changed();
+                        ui.horizontal(|ui|{
+                            if let Err(message)=rule.validate(){
+                                ui.colored_label(egui::Color32::from_rgb(240,125,110),"⚠")
+                                    .on_hover_text(message);
+                            }
+                            if ui.small_button(tr(lang,"删除","Delete")).clicked(){
+                                remove=Some(index);
+                            }
+                        });
+                        ui.end_row();
+                    }
+                });
+            });
+        if let Some(index)=remove {
+            rules.remove(index);
+            changed=true;
+        }
+        if ui.button(if windows_to_mac{
+            tr(lang,"＋ 添加 Windows → Mac 映射","＋ Add Windows → Mac mapping")
+        }else{
+            tr(lang,"＋ 添加 Mac → Windows 映射","＋ Add Mac → Windows mapping")
+        }).clicked(){
+            rules.push(input::ShortcutMapping{
+                from_os,source:String::new(),target:String::new(),enabled:false,
+            });
+            changed=true;
+        }
+        if !rules.iter().any(|r|r.from_os==from_os){
+            ui.small(tr(lang,"此方向暂无规则：全部原样透传。",
+                "No mappings for this direction: all keys pass through."));
+        }
+        changed
+    }).inner
+}
+
 struct KvmApp {
     settings: Settings,
     state: Arc<engine::Shared>,
@@ -666,73 +750,30 @@ impl KvmApp {
             }
         });
         ui.add_space(12.0);
-        section_card(ui,tr(lang,"显式快捷键映射表","Explicit shortcut mappings"),|ui|{
+        section_card(ui,tr(lang,"快捷键映射（显式配置）","Shortcut mappings (explicit)"),|ui|{
             ui.small(tr(lang,
-                "所有生效规则都在下方列出并保存到 settings.json。没有命中的组合键原样透传；相同系统之间总是透传，不存在隐藏的默认映射。F12 保留为紧急返回键。",
-                "Every active rule is visible below and saved in settings.json. Unmatched chords pass through unchanged. Same-OS sessions always pass through, with no hidden defaults. F12 is reserved for emergency return."));
+                "以下两张表是全部映射来源，保存到 settings.json。没有命中的组合键、同系统连接都原样透传；不存在隐藏默认层。F12 始终保留为紧急返回键。",
+                "Both lists below are the entire mapping configuration, persisted to settings.json. Unmatched chords and same-OS sessions pass through unchanged; there is no hidden default layer. F12 always returns control."));
             let mut changed=false;
-            let mut remove=None;
-            egui::ScrollArea::vertical().max_height(330.0).show(ui,|ui|{
-                for (index,rule) in self.settings.shortcut_mappings.iter_mut().enumerate(){
-                    ui.push_id(("shortcut-rule",index),|ui|{
-                        ui.horizontal_wrapped(|ui|{
-                            changed|=ui.checkbox(&mut rule.enabled,"").changed();
-                            egui::ComboBox::from_id_salt("shortcut-source-os")
-                                .selected_text(match rule.from_os{
-                                    model::Platform::Windows=>"Windows → Mac",
-                                    model::Platform::Mac=>"Mac → Windows"
-                                }).show_ui(ui,|ui|{
-                                    changed|=ui.selectable_value(&mut rule.from_os,
-                                        model::Platform::Windows,"Windows → Mac").changed();
-                                    changed|=ui.selectable_value(&mut rule.from_os,
-                                        model::Platform::Mac,"Mac → Windows").changed();
-                                });
-                            ui.label(tr(lang,"源","From"));
-                            changed|=ui.add_sized([117.0,23.0],
-                                egui::TextEdit::singleline(&mut rule.source)).changed();
-                            ui.label("→");
-                            changed|=ui.add_sized([135.0,23.0],
-                                egui::TextEdit::singleline(&mut rule.target)).changed();
-                            if ui.button(tr(lang,"删除","Delete")).clicked(){remove=Some(index);}
-                        });
-                        if let Err(err)=rule.validate(){
-                            ui.colored_label(egui::Color32::from_rgb(240,125,110),
-                                format!("{}: {err}",tr(lang,"无效规则（不会执行）",
-                                    "Invalid rule (ignored)")));
-                        }
-                    });
-                    ui.separator();
-                }
-            });
-            if let Some(index)=remove {
-                self.settings.shortcut_mappings.remove(index);
+            changed|=shortcut_mapping_group_ui(ui,&mut self.settings.shortcut_mappings,
+                model::Platform::Windows,lang);
+            ui.separator();
+            changed|=shortcut_mapping_group_ui(ui,&mut self.settings.shortcut_mappings,
+                model::Platform::Mac,lang);
+            ui.separator();
+            if ui.button(tr(lang,"恢复两张表的可见预设","Restore visible presets for both lists")).clicked(){
+                self.settings.shortcut_mappings=input::presets();
                 changed=true;
             }
-            ui.horizontal_wrapped(|ui|{
-                if ui.button(tr(lang,"添加一条规则","Add mapping")).clicked(){
-                    self.settings.shortcut_mappings.push(input::ShortcutMapping{
-                        from_os:model::Platform::Windows,
-                        source:String::new(),target:String::new(),enabled:false,
-                    });
-                    changed=true;
-                }
-                if ui.button(tr(lang,"恢复可见预设","Restore visible presets")).clicked(){
-                    self.settings.shortcut_mappings=input::presets();
-                    changed=true;
-                }
-            });
             if changed {
                 self.state.set_shortcuts(&self.settings.shortcut_mappings);
                 self.persist_settings();
             }
             let table=input::ShortcutTable::compile(&self.settings.shortcut_mappings);
             ui.small(format!("{}: {} · {}: {}",
-                tr(lang,"生效规则","Active rules"),table.len(),
-                tr(lang,"跳过的无效/重复规则","Invalid or duplicate rows"),table.errors()));
-            if self.settings.shortcut_mappings.is_empty(){
-                ui.strong(tr(lang,"当前没有快捷键规则：全部原样透传。",
-                    "No shortcut mappings: all chords pass through unchanged."));
-            }
+                tr(lang,"当前有效映射","Active mappings"),table.len(),
+                tr(lang,"无效或重复规则（已跳过）","Invalid or duplicate (skipped)"),
+                table.errors()));
         });
         ui.add_space(12.0);
         if self.settings.role_server{
@@ -825,6 +866,12 @@ impl KvmApp {
                 self.state.wheel_packets.load(Ordering::Relaxed)));
             ui.label(format!("{}: {}",tr(lang,"侧键事件（Windows 捕获）","Side button events captured"),
                 self.state.side_button_packets.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {}",tr(lang,"快捷键匹配次数（控制端）","Shortcut matches (controller)"),
+                self.state.shortcuts_matched.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {} / {}",
+                tr(lang,"快捷键注入尝试 / 报错（接收端）","Shortcut injection attempts / errors (receiver)"),
+                self.state.shortcuts_injected.load(Ordering::Relaxed),
+                self.state.shortcuts_failed.load(Ordering::Relaxed)));
             ui.label(format!("{}: {}",tr(lang,"原生鼠标数据包","Native mouse packets"),
                 self.state.native_motion_packets.load(Ordering::Relaxed)));
             ui.label(format!("{}: {} / {}",tr(lang,"鼠标按下 / 松开（捕获）","Mouse down/up captured"),
@@ -841,7 +888,7 @@ impl KvmApp {
             }
             if ui.button(tr(lang,"复制完整诊断","Copy full diagnostics")).clicked(){
                 let diagnostic=format!(
-                    "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nScroll speed: {:.1}x (4 px/notch at 1x)\nNetwork RTT: {:?} ms\nRTT peak: {} ms\nWheel packets: {}\nSide button events: {}\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
+                    "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nScroll speed: {:.1}x (4 px/notch at 1x)\nNetwork RTT: {:?} ms\nRTT peak: {} ms\nWheel packets: {}\nSide button events: {}\nShortcut matches (controller): {}\nShortcut injection attempts (receiver): {}\nShortcut injection errors (receiver): {}\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
                     env!("CARGO_PKG_VERSION"),
                     std::env::consts::OS,
                     if self.settings.role_server{"receiver"}else{"controller"},
@@ -855,6 +902,9 @@ impl KvmApp {
                     self.state.rtt_peak_ms.load(Ordering::Relaxed),
                     self.state.wheel_packets.load(Ordering::Relaxed),
                     self.state.side_button_packets.load(Ordering::Relaxed),
+                    self.state.shortcuts_matched.load(Ordering::Relaxed),
+                    self.state.shortcuts_injected.load(Ordering::Relaxed),
+                    self.state.shortcuts_failed.load(Ordering::Relaxed),
                     self.state.native_motion_packets.load(Ordering::Relaxed),
                     self.state.mouse_down_captured.load(Ordering::Relaxed),
                     self.state.mouse_up_captured.load(Ordering::Relaxed),
