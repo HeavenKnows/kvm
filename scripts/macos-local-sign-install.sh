@@ -31,7 +31,9 @@ setup(){
     err "Previous local cert is invalid; repair it in Keychain Access, do not rotate it."
   fi
   work
-  chain="$(security default-keychain -d user|tr -d '"')"
+  # CI may provide a temporary user keychain explicitly. Ordinary Macs
+  # continue using their current default login keychain.
+  chain="${KVM_KEYCHAIN_PATH:-$(security default-keychain -d user|tr -d '"')}"
   # Keychains can be managed by securityd and need not appear to this
   # shell as a regular file; let "security import" validate the keychain.
   [[ -n "$chain" ]]||err "No default user keychain was selected."

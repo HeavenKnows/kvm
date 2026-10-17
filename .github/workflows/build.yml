@@ -65,6 +65,9 @@ jobs:
           security set-keychain-settings -u -t 3600 "$CI_KEYCHAIN"
           security default-keychain -d user -s "$CI_KEYCHAIN"
           security list-keychains -d user -s "$CI_KEYCHAIN"
+          echo "Temporary keychain file:"
+          ls -l "$CI_KEYCHAIN"
+          export KVM_KEYCHAIN_PATH="$CI_KEYCHAIN"
           bash scripts/macos-local-sign-install.sh --setup
           bash scripts/macos-local-sign-install.sh --check
 
