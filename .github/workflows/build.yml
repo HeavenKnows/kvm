@@ -99,7 +99,16 @@ jobs:
           # that generates/reuses one key in the user's login keychain, then
           # re-signs each release with a stable designated requirement.
           bash -n scripts/macos-local-sign-install.sh
-          # Exercise the first-time identity bootstrap on real macOS.
+          # GitHub-hosted macOS runners have no interactive login keychain.
+          # Create a throwaway default *user* keychain to test the exact
+          # same local certificate/bootstrap flow, never ship this identity.
+          CI_KEYCHAIN="$RUNNER_TEMP/kvm-ci.keychain-db"
+          CI_KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          security create-keychain -p "$CI_KEYCHAIN_PASSWORD" "$CI_KEYCHAIN"
+          security unlock-keychain -p "$CI_KEYCHAIN_PASSWORD" "$CI_KEYCHAIN"
+          security set-keychain-settings -u -t 3600 "$CI_KEYCHAIN"
+          security default-keychain -d user -s "$CI_KEYCHAIN"
+          security list-keychains -d user -s "$CI_KEYCHAIN"
           bash scripts/macos-local-sign-install.sh --setup
           bash scripts/macos-local-sign-install.sh --check
           # Keep the public DMG unnotarized; no private key is shipped.
