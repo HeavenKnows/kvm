@@ -32,7 +32,9 @@ setup(){
   fi
   work
   chain="$(security default-keychain -d user|tr -d '"')"
-  [[ -f "$chain" ]]||err "Login keychain is not available."
+  # Keychains can be managed by securityd and need not appear to this
+  # shell as a regular file; let "security import" validate the keychain.
+  [[ -n "$chain" ]]||err "No default user keychain was selected."
   password="$(openssl rand -hex 24)"
   cat >"$TMP/cert.conf" <<'CONF'
 [req]
