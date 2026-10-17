@@ -2,7 +2,7 @@
 //! after eframe/winit has entered its Windows message loop (on the GUI thread).
 //! Closing the settings viewport hides it; only the tray's Quit command exits.
 #![cfg(target_os="windows")]
-use crate::model::Language;
+use crate::{engine::Shared,model::Language};
 use eframe::egui;
 use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
 use tray_icon::{Icon,TrayIcon,TrayIconBuilder,TrayIconEvent,MouseButton,MouseButtonState,
@@ -38,7 +38,7 @@ pub fn should_hide_close(tray_available:bool,quitting:bool)->bool{
     tray_available && !quitting
 }
 impl WindowsTray {
-    pub fn new(ctx:&egui::Context,language:Language)->Result<Self,String>{
+    pub fn new(ctx:&egui::Context,language:Language,shared:Arc<Shared>)->Result<Self,String>{
         let open=MenuItem::new(
             if language==Language::Zh{"打开设置"}else{"Open settings"},true,None);
         let quit=MenuItem::new(
@@ -53,14 +53,19 @@ impl WindowsTray {
         let will_open=open_requested.clone();
         let will_quit=quitting.clone();
         let menu_ctx=ctx.clone();
+        let quit_shared=shared;
         MenuEvent::set_event_handler(Some(move |event:MenuEvent|{
             if event.id==open_id {
                 will_open.store(true,Ordering::SeqCst);
                 menu_ctx.request_repaint();
             }else if event.id==quit_id {
                 will_quit.store(true,Ordering::SeqCst);
-                menu_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                menu_ctx.request_repaint();
+                // A hidden viewport has no reliable redraw/Close dispatch.
+                // Quit MUST happen in this native menu callback, not in the
+                // eframe update loop (which may never be called while hidden).
+                // First return remote input ownership and close the socket.
+                quit_shared.stop();
+                std::process::exit(0);
             }
         }));
         // Users can double-click the icon rather than opening the menu.

@@ -272,6 +272,23 @@ fn shortcut_mapping_group_ui(
     }).inner
 }
 
+/// Translate one complete pointer gesture into virtual desktop pixels.
+/// `egui::Response::drag_delta` measures only the LAST FRAME, so it must
+/// never be added to a stored drag origin. This helper always uses two
+/// absolute pointer positions, including the final mouse-up event.
+fn drag_screen_position(
+    screen_origin:(i32,i32),
+    press:egui::Pos2,
+    current:egui::Pos2,
+    scale:f32
+)->(i32,i32){
+    let delta=(current-press)/scale.max(0.001);
+    (
+        screen_origin.0.saturating_add(delta.x.round() as i32),
+        screen_origin.1.saturating_add(delta.y.round() as i32)
+    )
+}
+
 struct KvmApp {
     settings: Settings,
     state: Arc<engine::Shared>,
@@ -280,8 +297,8 @@ struct KvmApp {
     ip_changed_notice:bool,
     ip_monitor_disconnected:bool,
     ip_refresh_tx:mpsc::Sender<()>,
-    drag_start_layout: Option<Layout>,
     drag_start_group:Option<(i32,i32)>,
+    drag_start_pointer:Option<egui::Pos2>,
     /// The free position of the remote display while dragging.
     drag_preview:Option<(i32,i32)>,
     dragging_remote:Option<usize>,
@@ -378,7 +395,8 @@ impl KvmApp {
             settings,state,ips:Vec::new(),
             ip_snapshot_seen:false,ip_changed_notice:false,
             ip_monitor_disconnected:false,ip_refresh_tx,
-            drag_start_layout:None,drag_start_group:None,
+            drag_start_group:None,
+            drag_start_pointer:None,
             drag_preview:None,dragging_remote:None,
             display_rx:Some(display_rx),ip_rx:Some(ip_rx),
             startup_at:Instant::now(),display_loaded:false,display_slow:false,
@@ -448,17 +466,12 @@ impl KvmApp {
         self.settings.local_display=self.settings.local_display.min(local.len()-1);
         self.settings.remote_display=self.settings.remote_display.min(remote.len()-1);
         ui.heading(tr(lang,"显示器布局","Display arrangement"));
-        ui.label(tr(lang,
-            "灰色为本机，蓝色为接收端。拖动任意蓝色显示器，靠近灰色显示器边缘时自动吸附。",
-            "Grey: this computer. Blue: receiver. Drag any blue display near a grey display to snap to its edge."));
 
-        let (area,_)=ui.allocate_exact_size(
-            egui::vec2(ui.available_width().min(730.0),365.0),egui::Sense::hover());
-        // CRITICAL: take each screen snapshot once, then DROP the MutexGuard
-        // before calculating layout. In the old chained width.min(height)
-        // expression remote_screen.lock() appeared twice; Rust extends its
-        // temporary guard to the end of the entire let statement, so the
-        // second lock deadlocked the GUI on the first full settings frame.
+        // ONE stable egui interaction rectangle owns the entire gesture.
+        // The remote display graphic moves independently; its changing
+        // bounds must NOT become the gesture's hit target each frame.
+        let (area,canvas)=ui.allocate_exact_size(
+            egui::vec2(ui.available_width().min(730.0),365.0),egui::Sense::drag());
         let local_size=self.state.local_screen();
         let remote_size={*self.state.remote_screen.lock().unwrap()};
         let scale=(area.width()/(local_size.w.max(remote_size.w) as f32*3.1))
@@ -477,10 +490,59 @@ impl KvmApp {
         };
         let (gx,gy)=group_origin(self.settings.layout,&local,&remote,
             self.settings.local_display,self.settings.remote_display);
+        // A pointer-down inside a blue monitor chooses WHICH remote screen
+        // moves. From then on the stable canvas ID retains pointer capture
+        // even when the blue rectangle moves away from the original click.
+        if canvas.drag_started(){
+            let pressed=ui.ctx().input(|i|i.pointer.press_origin());
+            if let Some(press)=pressed {
+                let selected=(0..remote.len()).rev().find(|&i|{
+                    to_rect(remote[i],gx,gy).contains(press)
+                });
+                if let Some(i)=selected{
+                    let origin=(remote[i].x+gx,remote[i].y+gy);
+                    self.dragging_remote=Some(i);
+                    self.drag_start_group=Some(origin);
+                    self.drag_start_pointer=Some(press);
+                    self.drag_preview=Some(origin);
+                }
+            }
+        }
+        if canvas.dragged(){
+            if let (Some(_),Some(origin),Some(press))=(
+                self.dragging_remote,self.drag_start_group,self.drag_start_pointer
+            ){
+                if let Some(pointer)=canvas.interact_pointer_pos(){
+                    self.drag_preview=Some(drag_screen_position(origin,press,pointer,scale));
+                }
+            }
+        }
+        if canvas.drag_stopped(){
+            if let Some(i)=self.dragging_remote{
+                let origin=self.drag_start_group.unwrap_or((remote[i].x+gx,remote[i].y+gy));
+                let dropped=match (self.drag_start_pointer,canvas.interact_pointer_pos()){
+                    (Some(press),Some(pointer))=>drag_screen_position(origin,press,pointer,scale),
+                    _=>self.drag_preview.unwrap_or(origin),
+                };
+                let (li,layout)=snap_to_edge(&local,&remote,i,dropped.0,dropped.1);
+                // The chosen adjacent edges touch EXACTLY (no gap).
+                // Perpendicular offset stays free for different resolutions.
+                self.settings.local_display=li;
+                self.settings.remote_display=i;
+                self.settings.layout=layout.clamp(local[li].screen(),remote[i].screen());
+                *self.state.layout.lock().unwrap()=self.settings.layout;
+                self.state.set_layout_targets(li,i);
+                self.persist_settings();
+            }
+            self.dragging_remote=None;
+            self.drag_preview=None;
+            self.drag_start_group=None;
+            self.drag_start_pointer=None;
+        }
         for (i,d) in local.iter().enumerate(){
             let r=to_rect(*d,0,0);
             let selected=i==self.settings.local_display;
-            painter.rect_filled(r,4.0,if selected{
+            painter.rect_filled(r,4.0,if selected {
                 egui::Color32::from_rgb(108,128,158)
             }else{egui::Color32::from_rgb(76,91,113)});
             painter.rect_stroke(r,4.0,
@@ -490,16 +552,10 @@ impl KvmApp {
                 format!("{} {}",tr(lang,"本机","Local"),i+1),
                 egui::FontId::proportional(12.0),egui::Color32::WHITE);
         }
-        // Snapshot placement only once on pointer-down, move the remote
-        // display freely while held, and snap the touching edges on release.
-        // Updating layout during drag made the screen teleport to an adjacent
-        // edge each frame, preventing crossing from right to left.
         for (i,d) in remote.iter().enumerate(){
-            let original_x=d.x+gx;
-            let original_y=d.y+gy;
             let (x,y)=if self.dragging_remote==Some(i){
-                self.drag_preview.unwrap_or((original_x,original_y))
-            }else{(original_x,original_y)};
+                self.drag_preview.unwrap_or((d.x+gx,d.y+gy))
+            }else{(d.x+gx,d.y+gy)};
             let r=to_rect(*d,x-d.x,y-d.y);
             let selected=i==self.settings.remote_display||
                 self.dragging_remote==Some(i);
@@ -512,37 +568,6 @@ impl KvmApp {
             painter.text(r.center(),egui::Align2::CENTER_CENTER,
                 format!("{} {}",tr(lang,"远端","Remote"),i+1),
                 egui::FontId::proportional(12.0),egui::Color32::WHITE);
-            let drag=ui.interact(r,ui.id().with(("remote-monitor",i)),egui::Sense::drag());
-            if drag.drag_started(){
-                self.drag_start_layout=Some(self.settings.layout);
-                self.drag_start_group=Some((original_x,original_y));
-                self.drag_preview=Some((original_x,original_y));
-                self.dragging_remote=Some(i);
-            }
-            if drag.dragged() && self.dragging_remote==Some(i){
-                let (sx,sy)=self.drag_start_group.unwrap_or((original_x,original_y));
-                let delta=drag.drag_delta()/scale;
-                self.drag_preview=Some((
-                    sx.saturating_add(delta.x.round() as i32),
-                    sy.saturating_add(delta.y.round() as i32)
-                ));
-            }
-            if drag.drag_stopped() && self.dragging_remote==Some(i){
-                let (px,py)=self.drag_preview.unwrap_or((original_x,original_y));
-                let (li,layout)=snap_to_edge(&local,&remote,i,px,py);
-                // A snapped Layout always draws shared edges flush:
-                // Right uses l.x+l.w, Left uses l.x-r.w, etc.
-                self.settings.local_display=li;
-                self.settings.remote_display=i;
-                self.settings.layout=layout.clamp(local[li].screen(),d.screen());
-                *self.state.layout.lock().unwrap()=self.settings.layout;
-                self.state.set_layout_targets(li,i);
-                self.dragging_remote=None;
-                self.drag_preview=None;
-                self.drag_start_layout=None;
-                self.drag_start_group=None;
-                self.persist_settings();
-            }
         }
         let ld=local[self.settings.local_display];
         let rd=remote[self.settings.remote_display];
@@ -1006,7 +1031,7 @@ impl eframe::App for KvmApp {
             // Never hide the window if creating the tray failed.
             if !self.win_tray_attempted && self.frames>=2 {
                 self.win_tray_attempted=true;
-                match windows_tray::WindowsTray::new(ctx,self.settings.language){
+                match windows_tray::WindowsTray::new(ctx,self.settings.language,self.state.clone()){
                     Ok(tray)=>self.win_tray=Some(tray),
                     Err(error)=>self.win_tray_error=Some(error),
                 }
@@ -1293,5 +1318,30 @@ mod receiver_network_refresh_tests{
         assert_eq!(ips,vec![one,two]);
         assert!(!apply_ip_snapshot(&mut ips,&mut seen,&mut notice,vec![one,two]));
         assert!(!notice);
+    }
+}
+
+#[cfg(test)]
+mod layout_drag_regression_tests{
+    use super::*;
+    #[test]
+    fn movement_uses_full_gesture_not_last_frame(){
+        // Screens have different resolutions. Several frames of motion must
+        // accumulate from the INITIAL click rather than springing back.
+        let start=(1920,200);
+        let press=egui::pos2(400.0,200.0);
+        let frame1=drag_screen_position(start,press,egui::pos2(390.0,210.0),0.1);
+        let frame2=drag_screen_position(start,press,egui::pos2(290.0,250.0),0.1);
+        let frame3=drag_screen_position(start,press,egui::pos2(285.0,270.0),0.1);
+        assert_eq!(frame1,(1820,300));
+        assert_eq!(frame2,(820,700));
+        assert_eq!(frame3,(770,900));
+        assert_eq!(drag_screen_position(start,press,egui::pos2(285.0,270.0),0.1),frame3);
+        let local=model::single_display(model::Screen::new(2560,1440));
+        let remote=model::single_display(model::Screen::new(1920,1080));
+        let (_,snap)=model::snap_to_edge(&local,&remote,0,-1920,220);
+        assert_eq!(snap.side,Side::Left);
+        assert_eq!(snap.offset,220);
+        assert_eq!(model::group_origin(snap,&local,&remote,0,0).0,-1920);
     }
 }
