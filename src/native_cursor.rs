@@ -16,7 +16,14 @@ mod mac {
         fn CGWarpMouseCursorPosition(p:Point)->i32;
         fn CGEventCreateMouseEvent(source:*const c_void,event_type:u32,point:Point,button:u32)->*mut c_void;
         fn CGEventPost(tap_location:u32,event:*mut c_void);
-        fn CGEventCreateScrollWheelEvent(source:*const c_void,units:u32,wheel_count:u32,...) -> *mut c_void;
+        // CoreGraphics CGEvent.h declares wheel1 as a FIXED argument,
+        // and only wheel2/3 are variadic. This is essential on Apple arm64:
+        // fixed values are register-passed, varargs are stack-passed.
+        fn CGEventCreateScrollWheelEvent(
+            source:*const c_void,units:u32,wheel_count:u32,wheel1:i32,...
+        )->*mut c_void;
+        #[cfg(test)]
+        fn CGEventGetIntegerValueField(event:*const c_void,field:u32)->i64;
         fn AXIsProcessTrusted()->bool;
     }
     #[link(name="CoreFoundation",kind="framework")]
@@ -107,20 +114,54 @@ mod mac {
             assert_eq!(movement_kind(Some(rdev::Button::Middle)),(27,2));
             assert_eq!(movement_kind(None),(5,0));
         }
+        #[test]
+        fn apple_silicon_scroll_abi_preserves_vertical_direction(){
+            // This test calls the ACTUAL CoreGraphics function in the macOS
+            // CI runner, rather than merely checking a Rust sign conversion.
+            // It would catch the beta.12/13 declaration where wheel1 was
+            // incorrectly classified as a variadic argument.
+            for &(win_x,win_y) in &[(0,4),(0,-4),(3,0),(-3,0),
+                                   (3,4),(-3,-4)] {
+                let event=create_scroll_event(win_x,win_y).unwrap();
+                let point_y=unsafe{CGEventGetIntegerValueField(event,96)};
+                let point_x=unsafe{CGEventGetIntegerValueField(event,97)};
+                unsafe{CFRelease(event);}
+                assert_eq!(point_y,win_y as i64,
+                    "CoreGraphics vertical sign/ABI mismatch for ({win_x},{win_y})");
+                assert_eq!(point_x,-(win_x as i64),
+                    "CoreGraphics horizontal sign/ABI mismatch for ({win_x},{win_y})");
+            }
+        }
     }
     pub fn dimensions()->(i32,i32){
         let s=crate::display::current().screen();(s.w,s.h)
     }
+    /// Build a native pixel scroll event without posting. Uses the EXACT C
+    /// signature so the event's vertical axis cannot read uninitialized data
+    /// on Apple Silicon. Windows and Quartz share the vertical sign
+    /// (positive=up); their horizontal sign differs.
+    fn create_scroll_event(x:i32,y:i32)->Result<*mut c_void,String>{
+        // kCGScrollEventUnitPixel=0. Axis 1=vertical (fixed int32),
+        // axis 2=horizontal (first variadic int32).
+        let event=unsafe{CGEventCreateScrollWheelEvent(
+            std::ptr::null(),0,2,y,x.saturating_neg()
+        )};
+        if event.is_null(){Err("Cannot create macOS scroll event".into())}else{Ok(event)}
+    }
     pub fn scroll(x:i32,y:i32)->Result<(),String>{
-        if x==0 && y==0 {return Ok(());}
+        if x==0 && y==0{return Ok(());}
         if !trusted(){return Err("macOS Accessibility permission is not granted".into());}
-        // kCGScrollEventUnitPixel=0 (not Line=1): let very small
-        // controller multipliers produce smooth, fractional wheel movement.
-        // The controller accumulated subpixel deltas before transmission.
-        let event=unsafe{CGEventCreateScrollWheelEvent(std::ptr::null(),0,2,
-            y.clamp(-240,240),x.clamp(-240,240))};
-        if event.is_null(){return Err("Cannot create macOS scroll event".into());}
-        unsafe{CGEventPost(0,event);CFRelease(event);}
+        // Apple warns that large single wheel deltas can have unexpected
+        // effects in apps. Split high-speed/combined input into small signed
+        // events and bound the total work per inbound network message.
+        let(mut left_x,mut left_y)=(x.clamp(-160,160),y.clamp(-160,160));
+        while left_x!=0||left_y!=0 {
+            let(step_x,step_y)=(left_x.clamp(-10,10),left_y.clamp(-10,10));
+            let event=create_scroll_event(step_x,step_y)?;
+            unsafe{CGEventPost(0,event);CFRelease(event);}
+            left_x-=step_x;
+            left_y-=step_y;
+        }
         Ok(())
     }
     pub fn move_to(x:i32,y:i32)->Result<(),String>{

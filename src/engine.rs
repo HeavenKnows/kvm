@@ -1121,6 +1121,18 @@ mod tests {
         assert_eq!(fine.scale(0,120,0.1),(0,1));
         let mut single=WheelScale::default();
         assert_eq!(single.scale(0,120,1.0),(0,4));
+        assert_eq!(single.scale(0,-120,1.0),(0,-4));
+        assert_eq!(single.scale(120,0,1.0),(4,0));
+        assert_eq!(single.scale(-120,0,1.0),(-4,0));
+        // A direction reversal must not turn a signed delta into a
+        // permanently positive scroll, even at the slowest speed.
+        let mut slow=WheelScale::default();
+        let upward:(i32,i32)=(0..10).map(|_|slow.scale(0,120,0.1))
+            .fold((0,0),|(x,y),(a,b)|(x+a,y+b));
+        let downward:(i32,i32)=(0..10).map(|_|slow.scale(0,-120,0.1))
+            .fold((0,0),|(x,y),(a,b)|(x+a,y+b));
+        assert_eq!(upward,(0,4));
+        assert_eq!(downward,(0,-4));
     }
     #[test] fn paste_on_demand_routing(){
         assert_eq!(paste_action(true,Owner::Local,true),PasteAction::SendLocalClipboard);

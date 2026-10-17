@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.13，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.14，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -55,6 +55,13 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **侧键**：Windows 的 XBUTTON1/XBUTTON2 会跨机传输。Mac 默认把侧键按下映射为 `⌘[`（后退）和 `⌘]`（前进）；接收端「偏好设置 → 鼠标侧键」可改为原生 Mouse Button 4/5。鼠标厂商专有的 Windows 宏、驱动自定义组合键并不会自动同步到 Mac，必须由目标系统或本工具显式映射。
 - **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
 - **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
+
+## beta.14：修复 Apple Silicon 鼠标滚轮方向错误及跳页首
+
+- **根因**：beta.12/13 的 macOS 原生 `CGEventCreateScrollWheelEvent` FFI 声明错误：C 函数第 4 个参数 `wheel1` 是固定的 `int32_t`，旧 Rust 声明却把它放在 `...` 可变参数中。Apple Silicon 对固定参数与可变参数使用不同 ABI 寄存器/栈位置，可能产生异常滚动值，让上下滚动都跳向页首。此问题与鼠标滚轮速度设置无关。
+- **修复**：使用与 Apple 头文件一致的 FFI 签名，固定参数传递带符号的垂直位移；仅第二轴使用变参。保留 Windows 与 macOS 垂直方向符号，水平轴按平台差异反向。使用 `kCGScrollEventUnitPixel` 和小增量发送，单次事件不超过 10 像素，避免系统文档警告的大幅滚动导致不可预料的跳转。
+- **防回归**：Apple Silicon CI 新增真实 Core Graphics 对象创建测试，通过 `CGEventGetIntegerValueField` 读取事件的垂直/水平像素差（字段 96/97），逐项确认正/反方向及水平轴方向，而不是只检查 Rust 参数计算。Windows 测试覆盖带符号的 `RAWMOUSE.usButtonData` 正/负滚轮数据。测试在 CI 中只**创建事件，不实际向用户桌面发出滚动**，实机应用仍需 Windows 控制 Mac 验证。
+- **升级**：Windows 和 Apple Silicon macOS 两端均应升级 beta.14，退出旧进程后重新连接，再用网页中部开始双向慢速滚动测试。不要尝试用滚轮倍率来掩盖方向错误。
 
 ## 可见预设 + 自定义快捷键映射表（beta.13）
 

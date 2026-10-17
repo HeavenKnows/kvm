@@ -244,9 +244,14 @@ mod tests {
         assert_eq!(events,vec![(Button::Left,true),(Button::Right,false),
             (Button::Middle,true),(Button::Unknown(3),true),(Button::Unknown(4),false)]);
         assert!(platform::button_changes(0).is_empty());
+        // The sign bit in RAWMOUSE.usButtonData MUST be preserved.
+        // Windows positive vertical=up; negative vertical=down.
         assert_eq!(platform::wheel_change(0x0400,120),(0,120));
+        assert_eq!(platform::wheel_change(0x0400,-120),(0,-120));
         assert_eq!(platform::wheel_change(0x0400,-30),(0,-30));
         assert_eq!(platform::wheel_change(0x0800,120),(120,0));
+        assert_eq!(platform::wheel_change(0x0800,-120),(-120,0));
+        assert_eq!(platform::wheel_change(0,120),(0,0));
     }
     #[test]
     fn raw_input_registration_works() {
