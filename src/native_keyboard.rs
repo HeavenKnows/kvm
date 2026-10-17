@@ -91,38 +91,6 @@ pub fn shortcut(key:Key)->Result<(),String>{
     post(key,false,1<<20)?;
     post(Key::MetaLeft,false,0)
 }
-/// Emit Control+Arrow for macOS Spaces and Mission Control.
-/// Temporarily lift remapped Command from the Windows Ctrl key so it cannot
-/// turn the system shortcut into Command+Control+Arrow. Restore all modifiers
-/// afterwards without altering the receiver's logical pressed-key snapshot.
-pub fn control_arrow(key:Key,held:&HashSet<Key>)->Result<(),String>{
-    if !crate::input::mac_control_arrow(key){
-        return Err(format!("Not a macOS Control+Arrow key: {key:?}"));
-    }
-    let mut current=held.clone();
-    let mut lifted=Vec::new();
-    for command in [Key::MetaLeft,Key::MetaRight]{
-        if current.remove(&command) {
-            inject(command,false,&current)?;
-            lifted.push(command);
-        }
-    }
-    let added_control=current.insert(Key::ControlLeft);
-    if added_control{inject(Key::ControlLeft,true,&current)?;}
-    let action=(|| {
-        inject(key,true,&current)?;
-        inject(key,false,&current)
-    })();
-    if added_control {
-        current.remove(&Key::ControlLeft);
-        inject(Key::ControlLeft,false,&current)?;
-    }
-    for command in lifted {
-        current.insert(command);
-        inject(command,true,&current)?;
-    }
-    action
-}
 pub fn paste()->Result<(),String>{shortcut(Key::KeyV)}
 #[cfg(test)]
 mod tests {
@@ -138,8 +106,8 @@ mod tests {
         assert_eq!(flags(&held),(1<<20)|(1<<17)|(1<<19));
         assert_eq!(keycode(Key::Function),None);
         assert_eq!(keycode(Key::Unknown(1)),None);
-        assert!(crate::input::mac_control_arrow(Key::UpArrow));
-        assert!(!crate::input::mac_control_arrow(Key::KeyZ));
+        assert_eq!(keycode(Key::LeftArrow),Some(0x7B));
+        assert_eq!(keycode(Key::RightArrow),Some(0x7C));
     }
     #[test]
     fn modifier_key_up_keeps_other_side_pressed(){

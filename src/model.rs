@@ -180,7 +180,8 @@ pub struct Settings {
     pub address: String,
     pub secret: String,
     pub layout: Layout,
-    pub remap: bool,
+    /// Fully explicit, editable shortcuts. No hidden platform-mapping layer.
+    pub shortcut_mappings:Vec<crate::input::ShortcutMapping>,
     pub clipboard: bool,
     pub language: Language,
     pub listen_port: u16,
@@ -199,7 +200,8 @@ pub struct Settings {
 impl Default for Settings {
     fn default()->Self { Self {
         role_server: false, address:"192.168.1.10:24881".into(),
-        secret:String::new(), layout:Layout::default(), remap:true, clipboard:true,
+        secret:String::new(), layout:Layout::default(),
+        shortcut_mappings:crate::input::presets(),clipboard:true,
         language:Language::Zh, listen_port:24881, auto_start_receiver:true,
         mouse_speed:1.6,scroll_speed:3.0,side_buttons_native:false,
         local_display:0,remote_display:0,
@@ -223,8 +225,8 @@ pub fn load()->Settings {
     let legacy_path = dirs::config_dir().map(|p|p.join("crosskey").join("settings.json"));
     new_path.and_then(|p| std::fs::read(p).ok())
         .or_else(|| legacy_path.and_then(|p| std::fs::read(p).ok()))
-        .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
-        .map(|mut s| {
+        .and_then(|b| decode_settings(&b))
+        .map(|(mut s,migrated)| {
             if s.listen_port < 1024 {s.listen_port=24881;}
             if !s.mouse_speed.is_finite() || !(0.5..=4.0).contains(&s.mouse_speed) {
                 s.mouse_speed=1.6;
@@ -232,9 +234,21 @@ pub fn load()->Settings {
             if !s.scroll_speed.is_finite() || !(0.1..=16.0).contains(&s.scroll_speed){
                 s.scroll_speed=3.0;
             }
+            if migrated {save(&s);}
             s
         })
         .unwrap_or_else(||fresh_install_defaults(Platform::local()))
+}
+/// Migrate the legacy remap toggle into explicit, persisted rows. The old
+/// disabled setting becomes an EMPTY list, preserving user intent. Once the
+/// new field exists, even [] is authoritative and never repopulated.
+fn decode_settings(bytes:&[u8])->Option<(Settings,bool)>{
+    let value:serde_json::Value=serde_json::from_slice(bytes).ok()?;
+    let migrated=value.get("shortcut_mappings").is_none();
+    let legacy_disabled=value.get("remap").and_then(|v|v.as_bool())==Some(false);
+    let mut settings:Settings=serde_json::from_value(value).ok()?;
+    if migrated && legacy_disabled {settings.shortcut_mappings.clear();}
+    Some((settings,migrated))
 }
 pub fn save(s:&Settings){
     if let Some(p)=config_path(){
@@ -271,9 +285,23 @@ mod tests {
         assert_eq!(s.remote_display,0);
         assert_eq!(s.mouse_speed,1.6);
         assert_eq!(s.scroll_speed,3.0);
+        assert!(!s.shortcut_mappings.is_empty());
         let old=serde_json::to_string(&s).unwrap();
         let latest:Settings=serde_json::from_str(&old).unwrap();
         assert_eq!(latest.scroll_speed,3.0);
+    }
+    #[test] fn no_hidden_shortcut_mappings_on_migration(){
+        let old=br#"{"remap":false,"role_server":false}"#;
+        let (disabled,migrated)=decode_settings(old).unwrap();
+        assert!(migrated);
+        assert!(disabled.shortcut_mappings.is_empty());
+        let serialized=serde_json::to_vec(&disabled).unwrap();
+        let (reloaded,migrated)=decode_settings(&serialized).unwrap();
+        assert!(!migrated);
+        assert!(reloaded.shortcut_mappings.is_empty());
+        let (enabled,migrated)=decode_settings(br#"{"remap":true}"#).unwrap();
+        assert!(migrated);
+        assert!(!enabled.shortcut_mappings.is_empty());
     }
     #[test] fn vertical_offset_and_edge_transfer(){
         let local=Screen::new(1920,1080);

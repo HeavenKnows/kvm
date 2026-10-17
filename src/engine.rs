@@ -1,6 +1,6 @@
 use crate::{clipboard,display,input,native_cursor,native_motion, model::{self,Display,Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
-use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,AtomicU32,AtomicU64,Ordering},mpsc::{self,SyncSender}},time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
+use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,RwLock,atomic::{AtomicBool,AtomicI32,AtomicU32,AtomicU64,Ordering},mpsc::{self,SyncSender}},time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
 
 #[derive(Clone,Copy,PartialEq,Eq,Debug)]
 enum Owner { Local, Remote }
@@ -91,7 +91,7 @@ pub struct Shared {
     #[cfg(target_os="macos")]
     clipboard_ui_ctx:Mutex<Option<eframe::egui::Context>>,
     pub clipboard:AtomicBool,
-    pub remap:AtomicBool,
+    pub shortcuts:RwLock<input::ShortcutTable>,
     pub side_buttons_native:AtomicBool,
     owner:Mutex<Owner>,
     pending_dx:AtomicI32,
@@ -138,7 +138,8 @@ impl Shared {
             clipboard_ui_ctx:Mutex::new(None),
             stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
             native_started:AtomicBool::new(false),
-            clipboard:AtomicBool::new(s.clipboard),remap:AtomicBool::new(s.remap),
+            clipboard:AtomicBool::new(s.clipboard),
+            shortcuts:RwLock::new(input::ShortcutTable::compile(&s.shortcut_mappings)),
             side_buttons_native:AtomicBool::new(s.side_buttons_native),
             owner:Mutex::new(Owner::Local),
             pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
@@ -267,6 +268,11 @@ impl Shared {
         self.motion_gain.store(gain.clamp(0.5,4.0).to_bits(),Ordering::Relaxed);
         *self.motion_fraction.lock().unwrap()=MotionScale::default();
     }
+    /// Atomically swap the compiled shortcut table after an explicit UI edit.
+    /// Read it only on keyboard events; mouse/scroll paths never look it up.
+    pub fn set_shortcuts(&self,rows:&[input::ShortcutMapping]){
+        *self.shortcuts.write().unwrap()=input::ShortcutTable::compile(rows);
+    }
     pub fn set_scroll_speed(&self,gain:f32){
         self.scroll_gain.store(gain.clamp(0.1,16.0).to_bits(),Ordering::Relaxed);
         *self.scroll_fraction.lock().unwrap()=WheelScale::default();
@@ -359,6 +365,41 @@ fn inject_key(key:Key,down:bool,held:&HashSet<Key>)->Result<(),String>{
         let event=if down{EventType::KeyPress(key)}else{EventType::KeyRelease(key)};
         rdev::simulate(&event).map_err(|e|format!("Keyboard injection failed: {e:?}"))
     }
+}
+/// Replay one explicitly configured shortcut without modifying logical
+/// held-key state. Temporarily lift existing modifiers, press the target
+/// combination, then restore modifiers so the next physical key-up balances.
+fn perform_shortcut(chord:input::Chord,held:&HashSet<Key>)->Result<(),String>{
+    let mut pressed=held.clone();
+    let mut restore=held.iter().copied().filter(|k|
+        matches!(k,Key::ControlLeft|Key::ControlRight|
+            Key::ShiftLeft|Key::ShiftRight|Key::Alt|Key::AltGr|
+            Key::MetaLeft|Key::MetaRight)).collect::<Vec<_>>();
+    restore.sort_by_key(|k|format!("{k:?}"));
+    let mut first_error=None;
+    fn capture(result:Result<(),String>,error:&mut Option<String>){
+        if let Err(e)=result{if error.is_none(){*error=Some(e);}}
+    }
+    for &modifier in &restore {
+        pressed.remove(&modifier);
+        capture(inject_key(modifier,false,&pressed),&mut first_error);
+    }
+    let target_mods=chord.modifier_keys();
+    for &modifier in &target_mods {
+        pressed.insert(modifier);
+        capture(inject_key(modifier,true,&pressed),&mut first_error);
+    }
+    capture(inject_key(chord.key,true,&pressed),&mut first_error);
+    capture(inject_key(chord.key,false,&pressed),&mut first_error);
+    for &modifier in target_mods.iter().rev(){
+        pressed.remove(&modifier);
+        capture(inject_key(modifier,false,&pressed),&mut first_error);
+    }
+    for &modifier in &restore {
+        pressed.insert(modifier);
+        capture(inject_key(modifier,true,&pressed),&mut first_error);
+    }
+    match first_error{Some(e)=>Err(e),None=>Ok(())}
 }
 fn release_keys(held:&mut HashSet<Key>){
     // Drop modifiers one-by-one with updated flags; never leave Command stuck.
@@ -648,13 +689,10 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         }
                         }
                     }
-                    Wire::MacControlArrow(key) if shared.active.load(Ordering::Relaxed)=>{
-                        #[cfg(target_os="macos")]
-                        if let Err(e)=crate::native_keyboard::control_arrow(key,&pressed){
+                    Wire::Shortcut(chord) if shared.active.load(Ordering::Relaxed)=>{
+                        if let Err(e)=perform_shortcut(chord,&pressed){
                             shared.info(UiStatus::InputHookFailed(e));
                         }
-                        #[cfg(not(target_os="macos"))]
-                        {let _=key;}
                     }
                     Wire::Scroll{dx,dy} if shared.active.load(Ordering::Relaxed)=>{
                         if let Err(e)=native_cursor::scroll(dx,dy){
@@ -922,19 +960,18 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
 
 fn capture(shared:Arc<Shared>) {
     let pressed=Arc::new(Mutex::new(HashSet::<Key>::new()));
-    let skip_v=Arc::new(AtomicBool::new(false));
+    let suppressed=Arc::new(Mutex::new(HashSet::<Key>::new()));
     let skip_f12=Arc::new(AtomicBool::new(false));
-    let skip_arrows=Arc::new(Mutex::new(HashSet::<Key>::new()));
-    let p=pressed.clone(); let skip=skip_v.clone(); let skip_emergency=skip_f12.clone();
-    let workspace_keys=skip_arrows.clone();
+    let p=pressed.clone();
+    let ignored=suppressed.clone();
+    let skip_emergency=skip_f12.clone();
     let me=Platform::local();
     let hook_shared=shared.clone();
     if let Err(e)=rdev::grab(move |event| {
         if !hook_shared.ready.load(Ordering::Relaxed){
             p.lock().unwrap().clear();
-            skip.store(false,Ordering::SeqCst);
+            ignored.lock().unwrap().clear();
             skip_emergency.store(false,Ordering::SeqCst);
-            workspace_keys.lock().unwrap().clear();
             return Some(event);
         }
         let et=event.event_type.clone();
@@ -950,42 +987,49 @@ fn capture(shared:Arc<Shared>) {
                     hook_shared.return_cursor();
                     return None;
                 }
-                let chord=p.lock().unwrap().iter().any(|&v|input::primary(v,me));
-                // macOS Space/Mission Control uses Control+Arrow; normal
-                // Windows Ctrl+letters continue to map to Command+letters.
-                if remote && me==Platform::Windows
-                    && *hook_shared.target.lock().unwrap()==Platform::Mac
-                    && hook_shared.remap.load(Ordering::Relaxed)
-                    && chord && input::mac_control_arrow(k){
-                    workspace_keys.lock().unwrap().insert(k);
-                    hook_shared.send(Wire::MacControlArrow(k));
-                    return None;
+                // One exact lookup for the complete source chord. There is
+                // no modifier-wide fallback and no same-OS remapping.
+                let source_chord=input::Chord::from_held(k,&p.lock().unwrap());
+                let target=if remote{*hook_shared.target.lock().unwrap()}else{me};
+                let mapped=if remote {
+                    hook_shared.shortcuts.read().unwrap().find(
+                        me,target,k,&p.lock().unwrap())
+                }else{None};
+                let actual=if remote{mapped.unwrap_or(source_chord)}else{source_chord};
+                if actual.is_copy(if remote{target}else{me}){
+                    *hook_shared.owner.lock().unwrap()=
+                        if remote{Owner::Remote}else{Owner::Local};
                 }
-                if chord && (k==Key::KeyC || k==Key::KeyX){
-                    *hook_shared.owner.lock().unwrap()=if remote {Owner::Remote} else {Owner::Local};
-                }
-                if k==Key::KeyV && chord {
+                let is_paste=actual.is_paste(if remote{target}else{me});
+                if is_paste {
                     let owner=*hook_shared.owner.lock().unwrap();
-                    let action=paste_action(remote,owner,hook_shared.clipboard.load(Ordering::Relaxed));
+                    let action=paste_action(remote,owner,
+                        hook_shared.clipboard.load(Ordering::Relaxed));
                     match action {
                         PasteAction::SendLocalClipboard=>{
-                            skip.store(true,Ordering::SeqCst);
-                            if let Some(tx)=hook_shared.paste_sender.lock().unwrap().as_ref(){ let _=tx.try_send(()); }
+                            ignored.lock().unwrap().insert(k);
+                            if let Some(tx)=hook_shared.paste_sender.lock().unwrap().as_ref(){
+                                let _=tx.try_send(());
+                            }
                             return None;
                         }
                         PasteAction::RequestRemoteClipboard=>{
-                            skip.store(true,Ordering::SeqCst);
+                            ignored.lock().unwrap().insert(k);
                             hook_shared.send(Wire::ClipboardRequest);
                             return None;
                         }
                         PasteAction::Native=>{}
                     }
                 }
+                if let Some(target_chord)=mapped {
+                    ignored.lock().unwrap().insert(k);
+                    hook_shared.send(Wire::Shortcut(target_chord));
+                    return None;
+                }
             }
             EventType::KeyRelease(k)=>{
                 p.lock().unwrap().remove(&k);
-                if workspace_keys.lock().unwrap().remove(&k){return None;}
-                if k==Key::KeyV && skip.swap(false,Ordering::SeqCst){return None;}
+                if ignored.lock().unwrap().remove(&k){return None;}
                 if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
             }
             EventType::Wheel{..} if remote && cfg!(target_os="windows") => {
@@ -1046,13 +1090,7 @@ fn capture(shared:Arc<Shared>) {
             if matches!(et,EventType::KeyPress(Key::Function)|EventType::KeyRelease(Key::Function)){
                 return None;
             }
-            let target=*hook_shared.target.lock().unwrap();
-            let mapped=match et {
-                EventType::KeyPress(k)=>EventType::KeyPress(input::remap(k,me,target,hook_shared.remap.load(Ordering::Relaxed))),
-                EventType::KeyRelease(k)=>EventType::KeyRelease(input::remap(k,me,target,hook_shared.remap.load(Ordering::Relaxed))),
-                x=>x,
-            };
-            hook_shared.send(Wire::Input(mapped));
+            hook_shared.send(Wire::Input(et));
             None
         }else{Some(event)}
     }){
