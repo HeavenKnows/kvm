@@ -16,6 +16,24 @@ clean(){
   if [[ -n "$TMP" && -d "$TMP" ]];then rm -rf "$TMP";fi
 }
 trap clean EXIT
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]];then
+  cat <<'USAGE'
+kvm personal macOS installer / updater
+
+1. Quit the old kvm from the Mac menu bar.
+2. Mount the downloaded kvm-macos-arm64.dmg.
+3. In Terminal, run:
+      /bin/bash "/Volumes/kvm/install-kvm.sh"
+   If your volume is named "kvm 1", type "/bin/bash " then drag
+   install-kvm.sh from the DMG into Terminal and press Return.
+4. Open /Applications/kvm.app.
+
+Always use this script for subsequent updates: drag-and-drop overwrites
+the stable local signature and can reset macOS Accessibility permission.
+Do not run with sudo. Certificate/private key stay in your login keychain.
+USAGE
+  exit 0
+fi
 [[ "$(uname)" == Darwin ]]||err "Only supported on macOS."
 [[ "$(id -u)" != 0 ]]||err "Run without sudo."
 hash(){
@@ -92,6 +110,10 @@ esac
 bundle="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$SOURCE/Contents/Info.plist")"
 [[ "$bundle" == "$ID" ]]||err "Unexpected bundle identifier: $bundle"
 [[ -x "$SOURCE/Contents/MacOS/kvm" ]]||err "Missing kvm executable."
+# First verify the downloaded app bundle's original signature. This detects
+# corruption before we replace its signature with the user's stable identity.
+codesign --verify --strict "$SOURCE" ||
+  err "Downloaded kvm.app is modified or corrupt. Download it again from the project Actions."
 if pgrep -x kvm >/dev/null;then err "Quit running kvm from the menu bar first.";fi
 ditto "$SOURCE" "$TMP/kvm.app"
 h="$(setup|tail -n 1)"
@@ -125,4 +147,5 @@ fi
 if [[ -e "$BACKUP" ]];then sudo /bin/rm -rf "$BACKUP";fi
 say "Installed. Open /Applications/kvm.app."
 say "Reuse THIS updater for each release, not drag-and-drop."
-say "No notarization: Gatekeeper may still request first-open approval."
+say "No Apple notarization: first-open approval may still be required."
+say "If macOS explicitly reports malware, do not override that security warning."

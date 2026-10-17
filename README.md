@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.18，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.19，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -57,6 +57,18 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
 - **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
 
+## beta.19：macOS 安装脚本不再触发 Finder 双击拦截
+
+- **问题根因**：旧版 DMG 的 `Install or Update kvm.command` 被 Finder 双击时走 Gatekeeper 的“文档打开”路径；Apple 将命令行工具被这样拦截列为已知问题。直接将 `kvm.app` 拖入“应用程序”又会保留 GitHub Actions 每版变化的 Ad-hoc 签名，导致 macOS 辅助功能授权反复失效。
+- **新的 DMG**：只提供 `kvm.app`、**`install-kvm.sh`（普通文本脚本）**和 `安装与更新 - READ ME.txt`。不再提供可双击的 `.command` 或诱导直接拖拽覆盖的 Applications 快捷方式；Mac 下载的构建依然不能 Apple 公证（没有付费开发者身份）。
+- **安装 / 更新方式**：完全退出 kvm，打开下载的 DMG。在「终端」中输入 `/bin/bash `（后面一个空格），把 DMG 里的 `install-kvm.sh` 文件**拖入终端**并回车。也可以在 DMG 挂载为 `/Volumes/kvm` 时执行：
+  ```bash
+  /bin/bash "/Volumes/kvm/install-kvm.sh"
+  ```
+  **注意：拖的是脚本文件到终端输入行，而不是把 `kvm.app` 拖进应用程序目录。** 如果挂载路径变为 `/Volumes/kvm 1`，拖脚本路径最可靠。
+- 脚本先校验下载 App 的代码签名和 Bundle ID，再用**Mac 本机已保存的同一张个人证书**重新签名并验证；失败时不覆盖旧 App。第一次迁移旧签名仍可能重新授权一次，之后升级应该能保留辅助功能授权，但尚需真实 Mac 连续两个版本验收。系统恶意软件告警不可绕过。
+- **本机证书**只在你的 Mac 钥匙串中创建及保存，不上传仓库，不修改系统 Gatekeeper / SIP / TCC 权限数据库。Mac CI 测试脚本语法并核对安装文件进入 DMG，不会模拟需要人工授权的钥匙串交互。
+
 ## beta.18：修复屏幕拖拽弹回、Windows 托盘无法退出
 
 - **屏幕布局根因**：旧版错误地把 egui `Response::drag_delta()`（只返回这一帧位移）当作从按下鼠标以来的总位移。结果长距离拖动时每帧都回到起点附近，即使直到松手才吸附也无法移动。新版本使用一次固定画布手势，在鼠标按下时确定蓝色屏幕和鼠标起点，拖动期间以鼠标当前位置减去**最初**按下位置计算累计偏移；蓝色屏幕仅做自由实时预览，**松手时**才根据最终位置贴合本机显示器边缘并持久化。相邻边严格对齐，沿公共边的偏移支持不同显示器分辨率。保留精准偏移滑块。
@@ -67,17 +79,13 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 
 **为什么过去每次升级都失效？** GitHub Actions 以前用 `codesign --sign -` 临时（Ad-hoc）签署 `kvm.app`，它的指定代码要求（Designated Requirement）绑定到当前版本的 CDHash；升级时哈希变化，macOS TCC 无法确认还是同一个有权访问辅助功能的程序。保持 Bundle ID 不变**不足以**解决此问题。
 
-**个人使用的新安装方式**：Mac DMG 根目录新增 `Install or Update kvm.command`。它会在 Mac 本机登录钥匙串**只创建一次**有效期十年的 `kvm Local Code Signing` 自签名代码签名身份，之后重复使用同一张证书和私钥；只设置**当前用户的 Code Signing 信任策略**（不修改 SSL 信任、不关闭 Gatekeeper/SIP，也不直接写 TCC 数据库）。将下载的 `kvm.app` 先复制到临时目录，以固定的 `dev.heavenknows.kvm` Bundle ID 和该证书指纹作为指定代码要求重新签名，验证后才替换 `/Applications/kvm.app`。
+**个人使用的新安装方式**（beta.19 起以 `install-kvm.sh` 代替早期的 `.command`）：Mac DMG 根目录提供个人签名安装脚本。它会在 Mac 本机登录钥匙串**只创建一次**有效期十年的 `kvm Local Code Signing` 自签名代码签名身份，之后重复使用同一张证书和私钥；只设置**当前用户的 Code Signing 信任策略**（不修改 SSL 信任、不关闭 Gatekeeper/SIP，也不直接写 TCC 数据库）。将下载的 `kvm.app` 先复制到临时目录，以固定的 `dev.heavenknows.kvm` Bundle ID 和该证书指纹作为指定代码要求重新签名，验证后才替换 `/Applications/kvm.app`。
 
-**第一次迁移：**
-1. 完全退出 Mac 菜单栏上的旧版 kvm。
-2. 从本项目 Actions 下载并解压 `kvm-macos-arm64`，打开里面的 DMG。
-3. 打开终端执行 `bash "/Volumes/kvm/Install or Update kvm.command"`。首次会创建签名证书并可能请求钥匙串/管理员密码；不要使用 `sudo bash`。
-4. 打开 `/Applications/kvm.app`。从旧 Ad-hoc 签名迁移的**这一次**，可能还需要到「系统设置 → 隐私与安全性 → 辅助功能」重新勾选并重启应用。
+**beta.17 的旧 `.command` 流程已被 beta.19 替换。请遵循上面的 `install-kvm.sh` 终端安装方法。** 从旧 Ad-hoc 签名迁移这一次，可能还需要在「系统设置 → 隐私与安全性 → 辅助功能」重新勾选并重启应用。
 
 **未来每次更新**重复 1～3：使用 DMG 里的**安装/更新脚本**，**不要再将 app 从 DMG 拖到“应用程序”覆盖旧版**，否则会用回每版不同哈希的 CI Ad-hoc 签名，权限仍会失效。安装后的程序必须始终从 `/Applications/kvm.app` 启动，避免路径变化影响系统权限身份识别。
 
-可运行 `bash "/Volumes/kvm/Install or Update kvm.command" --check` 查看证书指纹和已安装 app 的指定要求。**请保留钥匙串中的签名证书及其私钥**；若丢失、过期或更换 Mac，须重新建立身份并完成一次授权。
+可运行 `bash "/Volumes/kvm/install-kvm.sh" --check` 查看证书指纹和已安装 app 的指定要求。**请保留钥匙串中的签名证书及其私钥**；若丢失、过期或更换 Mac，须重新建立身份并完成一次授权。
 
 **限制与安全边界：** 这只为**本机个人使用**建立可跨版本复用的代码身份，无法让 macOS 自动授予辅助功能权限，也**不是** Apple Developer ID、公证或 Gatekeeper 认可的开发者签名。首次或后续下载文件仍可能出现正常的安全确认；这不能在没有 Apple Developer ID 公证的条件下消除。整个过程不会把私钥导出到 GitHub 或其他主机。CI 只能检查安装器的 Shell 语法和打包，不能在无交互 Mac runner 上完成需要钥匙串确认的本地签名。**下载的 DMG 本身仍是 Ad-hoc**，必须运行本机安装器才能尝试保留授权。需要 Mac 实机验证更新后的 TCC 状态。
 

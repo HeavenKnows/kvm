@@ -86,7 +86,7 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>18</string>
+            <key>CFBundleVersion</key><string>19</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
@@ -103,14 +103,41 @@ jobs:
           # grants across releases. Ship a self-contained LOCAL installer
           # that generates/reuses one key in the user's login keychain, then
           # re-signs each release with a stable designated requirement.
-          # Keep the public DMG unnotarized; no private key is shipped.
-          # Users must run this installer instead of drag-to-Applications
-          # to preserve Accessibility grants on future updates.
+          # Finder double-clicking an unnotarized .command script can trigger
+          # Gatekeeper's stricter *document* path; Apple documents this as a
+          # known issue. Bundle a plain .sh DATA file instead, executed by
+          # /bin/bash in Terminal. Do not offer a misleading drag-install link:
+          # doing so would overwrite the user's stable personal signature.
           mkdir -p dist/dmg-root
           mv "$APP" dist/dmg-root/kvm.app
-          cp scripts/macos-local-sign-install.sh "dist/dmg-root/Install or Update kvm.command"
-          chmod 755 "dist/dmg-root/Install or Update kvm.command"
-          ln -s /Applications dist/dmg-root/Applications
+          cp scripts/macos-local-sign-install.sh "dist/dmg-root/install-kvm.sh"
+          chmod 644 "dist/dmg-root/install-kvm.sh"
+          cat > "dist/dmg-root/安装与更新 - READ ME.txt" <<'INSTRUCTIONS'
+          kvm (macOS) 安装与更新 / Installation & Updates
+
+          1. 从 Mac 菜单栏完全退出旧版 kvm。
+          2. 在 Mac 上打开「终端」(Terminal)。
+          3. 在终端输入 /bin/bash 后跟一个空格，然后将本 DMG 中的
+             install-kvm.sh 文件拖入终端，按回车。
+             或在挂载卷名为 kvm 时运行：
+             /bin/bash "/Volumes/kvm/install-kvm.sh"
+          4. 按照提示允许登录钥匙串签名和必要的管理员文件安装操作。
+          5. 启动 /Applications/kvm.app。
+
+          下次更新重复同样操作；不要将 kvm.app 从 DMG 拖拽覆盖！
+          拖拽会恢复临时签名，让「辅助功能」授权可能再次失效。
+          不要使用 sudo bash。首次换签名可能仍需重新授权一次。
+          没有 Apple 公证时，系统可能仍要求首次打开安全确认。
+          如明确报告“恶意软件”，不要绕过该警告。
+
+          English: Quit kvm. In Terminal type "/bin/bash " (with a trailing
+          space), drag this DMG's install-kvm.sh into Terminal, then Return.
+          Follow prompts, then open /Applications/kvm.app. Repeat for EACH
+          update; do NOT drag-install the app, which resets its code identity.
+          INSTRUCTIONS
+          test -f "dist/dmg-root/install-kvm.sh"
+          test ! -e "dist/dmg-root/Install or Update kvm.command"
+          test ! -L "dist/dmg-root/Applications"
           hdiutil create -volname "kvm" -srcfolder "dist/dmg-root" -ov -format UDZO \
             "dist/${{ matrix.artifact }}.dmg"
 
