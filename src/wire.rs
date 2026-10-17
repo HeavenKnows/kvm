@@ -18,6 +18,8 @@ pub enum Wire {
     Back,
     Input(EventType),
     MoveBy { dx:i32, dy:i32 },
+    /// Signed scroll lines after controller-side WHEEL_DELTA normalization.
+    Scroll { dx:i32, dy:i32 },
     /// Diagnostic probe for the encrypted LAN transport.
     Ping(u64),
     Pong(u64),
@@ -248,7 +250,8 @@ mod clipboard_wire_tests {
     #[test]
     fn binary_clipboard_chunks_roundtrip() {
         for message in [Wire::ClipboardRequest, Wire::ClipboardBegin { bytes: 128 },
-            Wire::ClipboardChunk(vec![0, 255, 1, 2]), Wire::ClipboardEnd] {
+            Wire::ClipboardChunk(vec![0, 255, 1, 2]), Wire::ClipboardEnd,
+            Wire::Scroll{dx:-2,dy:3}] {
             let bytes = rmp_serde::to_vec(&message).unwrap();
             let decoded: Wire = rmp_serde::from_slice(&bytes).unwrap();
             assert_eq!(format!("{message:?}"), format!("{decoded:?}"));

@@ -23,6 +23,20 @@ pub enum ClipboardUiJob {
     Install(Vec<u8>,mpsc::SyncSender<Result<(),String>>),
 }
 #[derive(Default)]
+struct WheelScale {x:f32,y:f32}
+impl WheelScale {
+    fn scale(&mut self,raw_x:i32,raw_y:i32,gain:f32)->(i32,i32) {
+        let gain=if gain.is_finite(){gain.clamp(1.0,10.0)}else{3.0};
+        fn axis(raw:i32,gain:f32,frac:&mut f32)->i32 {
+            let value=raw.clamp(-2400,2400) as f32 * gain/120.0 + *frac;
+            let lines=value.trunc() as i32;
+            *frac=value-lines as f32;
+            lines
+        }
+        (axis(raw_x,gain,&mut self.x),axis(raw_y,gain,&mut self.y))
+    }
+}
+#[derive(Default)]
 struct MotionScale {x:f32,y:f32}
 impl MotionScale{
     fn scale(&mut self,dx:i32,dy:i32,gain:f32)->(i32,i32){
@@ -57,6 +71,11 @@ pub struct Shared {
     pub mouse_injection_failures:std::sync::atomic::AtomicU64,
     pub motion_gain:AtomicU32,
     motion_fraction:Mutex<MotionScale>,
+    pub scroll_gain:AtomicU32,
+    scroll_fraction:Mutex<WheelScale>,
+    pub wheel_packets:AtomicU64,
+    pub side_button_packets:AtomicU64,
+    pub rtt_peak_ms:AtomicU64,
     pub rtt_ms:AtomicU64,
     clock:Instant,
     pub ready:AtomicBool,
@@ -72,6 +91,7 @@ pub struct Shared {
     clipboard_ui_ctx:Mutex<Option<eframe::egui::Context>>,
     pub clipboard:AtomicBool,
     pub remap:AtomicBool,
+    pub side_buttons_native:AtomicBool,
     owner:Mutex<Owner>,
     pending_dx:AtomicI32,
     pending_dy:AtomicI32,
@@ -104,7 +124,11 @@ impl Shared {
             mouse_injection_failures:std::sync::atomic::AtomicU64::new(0),
             motion_gain:AtomicU32::new(s.mouse_speed.to_bits()),
             motion_fraction:Mutex::new(MotionScale::default()),
-            rtt_ms:AtomicU64::new(u64::MAX),clock:Instant::now(),
+            scroll_gain:AtomicU32::new(s.scroll_speed.to_bits()),
+            scroll_fraction:Mutex::new(WheelScale::default()),
+            wheel_packets:AtomicU64::new(0),side_button_packets:AtomicU64::new(0),
+            rtt_ms:AtomicU64::new(u64::MAX),rtt_peak_ms:AtomicU64::new(0),
+            clock:Instant::now(),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
             #[cfg(target_os="macos")]
@@ -114,6 +138,7 @@ impl Shared {
             stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
             native_started:AtomicBool::new(false),
             clipboard:AtomicBool::new(s.clipboard),remap:AtomicBool::new(s.remap),
+            side_buttons_native:AtomicBool::new(s.side_buttons_native),
             owner:Mutex::new(Owner::Local),
             pending_dx:AtomicI32::new(0), pending_dy:AtomicI32::new(0),
             entry_local:Mutex::new((w/2,h/2)),out:Mutex::new(None),
@@ -210,9 +235,21 @@ impl Shared {
         self.pending_dy.fetch_add(dy,Ordering::Relaxed);
     }
     #[cfg(target_os="windows")]
+    pub fn add_native_wheel(&self,raw_x:i32,raw_y:i32){
+        if !self.ready.load(Ordering::Relaxed) ||
+           !self.active.load(Ordering::Relaxed){return;}
+        self.wheel_packets.fetch_add(1,Ordering::Relaxed);
+        let gain=f32::from_bits(self.scroll_gain.load(Ordering::Relaxed));
+        let (dx,dy)=self.scroll_fraction.lock().unwrap().scale(raw_x,raw_y,gain);
+        if dx!=0||dy!=0 {self.send(Wire::Scroll{dx,dy});}
+    }
+    #[cfg(target_os="windows")]
     pub fn add_native_button(&self,button:rdev::Button,pressed:bool){
         if !self.ready.load(Ordering::Relaxed) ||
            !self.active.load(Ordering::Relaxed) {return;}
+        if matches!(button,rdev::Button::Unknown(3)|rdev::Button::Unknown(4)){
+            self.side_button_packets.fetch_add(1,Ordering::Relaxed);
+        }
         if pressed {
             self.mouse_down_captured.fetch_add(1,Ordering::Relaxed);
             self.send(Wire::Input(EventType::ButtonPress(button)));
@@ -229,6 +266,10 @@ impl Shared {
         self.motion_gain.store(gain.clamp(0.5,4.0).to_bits(),Ordering::Relaxed);
         *self.motion_fraction.lock().unwrap()=MotionScale::default();
     }
+    pub fn set_scroll_speed(&self,gain:f32){
+        self.scroll_gain.store(gain.clamp(1.0,10.0).to_bits(),Ordering::Relaxed);
+        *self.scroll_fraction.lock().unwrap()=WheelScale::default();
+    }
     pub fn native_motion_stopped(&self,error:String){
         self.native_started.store(false,Ordering::SeqCst);
         self.shutdown_peer();
@@ -244,6 +285,7 @@ impl Shared {
         *self.pending_enter_since.lock().unwrap()=None;
         self.ready.store(false,Ordering::SeqCst);
         self.rtt_ms.store(u64::MAX,Ordering::Relaxed);
+        self.rtt_peak_ms.store(0,Ordering::Relaxed);
         if let Some(sock)=self.socket.lock().unwrap().take(){
             let _=sock.shutdown(std::net::Shutdown::Both);
         }
@@ -303,10 +345,33 @@ impl Shared {
         self.pending_dx.store(0,Ordering::Relaxed);
         self.pending_dy.store(0,Ordering::Relaxed);
         *self.motion_fraction.lock().unwrap()=MotionScale::default();
+        *self.scroll_fraction.lock().unwrap()=WheelScale::default();
     }
 }
 fn simulate(event:EventType){let _=rdev::simulate(&event);}
+fn inject_key(key:Key,down:bool,held:&HashSet<Key>)->Result<(),String>{
+    #[cfg(target_os="macos")]
+    {return crate::native_keyboard::inject(key,down,held);}
+    #[cfg(not(target_os="macos"))]
+    {
+        let _=held;
+        let event=if down{EventType::KeyPress(key)}else{EventType::KeyRelease(key)};
+        rdev::simulate(&event).map_err(|e|format!("Keyboard injection failed: {e:?}"))
+    }
+}
+fn release_keys(held:&mut HashSet<Key>){
+    // Drop modifiers one-by-one with updated flags; never leave Command stuck.
+    for key in held.iter().copied().collect::<Vec<_>>(){
+        held.remove(&key);
+        let _=inject_key(key,false,held);
+    }
+}
 fn paste_hotkey(os:Platform){
+    #[cfg(target_os="macos")]
+    if os==Platform::Mac {
+        let _=crate::native_keyboard::paste();
+        return;
+    }
     let primary=match os {Platform::Windows=>Key::ControlLeft,Platform::Mac=>Key::MetaLeft};
     simulate(EventType::KeyPress(primary));
     simulate(EventType::KeyPress(Key::KeyV));
@@ -524,7 +589,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     Wire::Back=>{
                         shared.active.store(false,Ordering::SeqCst);
                         entered_at=None;
-                        for k in pressed.drain(){simulate(EventType::KeyRelease(k));}
+                        release_keys(&mut pressed);
                         for b in buttons.drain(){
                             if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
                                 shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
@@ -573,7 +638,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                             shared.active.store(false,Ordering::SeqCst);
                             shared.send(Wire::Back);
                             shared.info(UiStatus::Returned);
-                            for k in pressed.drain(){simulate(EventType::KeyRelease(k));}
+                            release_keys(&mut pressed);
                             for b in buttons.drain(){
                             if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
                                 shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
@@ -582,10 +647,31 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         }
                         }
                     }
+                    Wire::Scroll{dx,dy} if shared.active.load(Ordering::Relaxed)=>{
+                        if let Err(e)=native_cursor::scroll(dx,dy){
+                            shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
+                            shared.info(UiStatus::InputHookFailed(e));
+                        }
+                    }
                     Wire::Input(evt) if shared.active.load(Ordering::Relaxed)=>{
                         match evt {
                             EventType::ButtonPress(b)=>{
                                 shared.mouse_down_received.fetch_add(1,Ordering::Relaxed);
+                                #[cfg(target_os="macos")]
+                                if !shared.side_buttons_native.load(Ordering::Relaxed){
+                                    let nav=match b{
+                                        rdev::Button::Unknown(3)=>Some(Key::LeftBracket),
+                                        rdev::Button::Unknown(4)=>Some(Key::RightBracket),
+                                        _=>None,
+                                    };
+                                    if let Some(key)=nav{
+                                        if let Err(e)=crate::native_keyboard::shortcut(key){
+                                            shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
+                                            shared.info(UiStatus::InputHookFailed(e));
+                                        }
+                                        continue;
+                                    }
+                                }
                                 match native_cursor::button_event(b,true,mouse.0,mouse.1){
                                     Ok(())=>{buttons.insert(b);},
                                     Err(e)=>{
@@ -596,6 +682,8 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                             }
                             EventType::ButtonRelease(b)=>{
                                 shared.mouse_up_received.fetch_add(1,Ordering::Relaxed);
+                                // Navigation-mode side buttons didn't post a down.
+                                if !buttons.contains(&b) {continue;}
                                 if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
                                     shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
                                     shared.info(UiStatus::InputHookFailed(e));
@@ -603,12 +691,26 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                                 buttons.remove(&b);
                             }
                             EventType::KeyPress(k)=>{
-                                pressed.insert(k);
-                                simulate(EventType::KeyPress(k));
+                                let new=pressed.insert(k);
+                                #[cfg(target_os="macos")]
+                                if !new && crate::native_keyboard::is_modifier(k){continue;}
+                                let _=new;
+                                if let Err(e)=inject_key(k,true,&pressed){
+                                    shared.info(UiStatus::InputHookFailed(e));
+                                }
                             }
                             EventType::KeyRelease(k)=>{
-                                pressed.remove(&k);
-                                simulate(EventType::KeyRelease(k));
+                                if pressed.remove(&k){
+                                    if let Err(e)=inject_key(k,false,&pressed){
+                                        shared.info(UiStatus::InputHookFailed(e));
+                                    }
+                                }
+                            }
+                            EventType::Wheel{delta_x,delta_y}=>{
+                                if let Err(e)=native_cursor::scroll(
+                                    delta_x.clamp(-50,50) as i32,delta_y.clamp(-50,50) as i32){
+                                    shared.info(UiStatus::InputHookFailed(e));
+                                }
                             }
                             other=>simulate(other),
                         }
@@ -629,7 +731,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     _=>{}
                 }
             }
-            for k in pressed {simulate(EventType::KeyRelease(k));}
+            release_keys(&mut pressed);
             for b in buttons {
                 if let Err(e)=native_cursor::button_event(b,false,mouse.0,mouse.1){
                     shared.mouse_injection_failures.fetch_add(1,Ordering::Relaxed);
@@ -767,7 +869,9 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
             Wire::Pong(tick)=>{
                 let current=shared.clock.elapsed().as_millis() as u64;
                 if current>=tick{
-                    shared.rtt_ms.store(current-tick,Ordering::Relaxed);
+                    let rtt=current-tick;
+                    shared.rtt_ms.store(rtt,Ordering::Relaxed);
+                    shared.rtt_peak_ms.fetch_max(rtt,Ordering::Relaxed);
                 }
             }
             Wire::EnterAck{accepted}=>{
@@ -861,6 +965,11 @@ fn capture(shared:Arc<Shared>) {
                 if k==Key::KeyV && skip.swap(false,Ordering::SeqCst){return None;}
                 if k==Key::F12 && skip_emergency.swap(false,Ordering::SeqCst){return None;}
             }
+            EventType::Wheel{..} if remote && cfg!(target_os="windows") => {
+                // Forwarded by the Windows Raw Input listener at full wheel
+                // precision. Suppress duplicate rdev wheel callbacks.
+                return None;
+            }
             EventType::ButtonPress(_) if remote => {
                 // Windows forwards RAWMOUSE button flags instead of duplicating
                 // these rdev hook events. The hook still suppresses local input.
@@ -909,6 +1018,11 @@ fn capture(shared:Arc<Shared>) {
             _=>{}
         }
         if remote {
+            // Windows Fn/Globe is not a portable key. Emitting this as a
+            // synthetic macOS event can invoke system Dictation.
+            if matches!(et,EventType::KeyPress(Key::Function)|EventType::KeyRelease(Key::Function)){
+                return None;
+            }
             let target=*hook_shared.target.lock().unwrap();
             let mapped=match et {
                 EventType::KeyPress(k)=>EventType::KeyPress(input::remap(k,me,target,hook_shared.remap.load(Ordering::Relaxed))),
@@ -934,6 +1048,14 @@ mod tests {
         assert_eq!(m.scale(1,0,0.5),(1,0));
         assert_eq!(m.scale(10,-4,2.0),(20,-8));
         assert_eq!(m.scale(100,-100,4.0),(400,-400));
+    }
+    #[test] fn precision_wheel_and_direction(){
+        let mut s=WheelScale::default();
+        assert_eq!(s.scale(0,30,3.0),(0,0));
+        assert_eq!(s.scale(0,30,3.0),(0,1));
+        assert_eq!(s.scale(0,30,3.0),(0,1));
+        assert_eq!(s.scale(0,30,3.0),(0,1));
+        assert_eq!(s.scale(-120,120,4.0),(-4,4));
     }
     #[test] fn paste_on_demand_routing(){
         assert_eq!(paste_action(true,Owner::Local,true),PasteAction::SendLocalClipboard);

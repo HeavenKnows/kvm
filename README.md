@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.10，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.11，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -48,6 +48,13 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **Mac 控制 Windows**：你在 Mac 键盘上按 `⌘V`，Windows 目标应用收到的应是 `Ctrl+V`。
 
 如果关闭映射则尽量发送原始键位；操作系统保留快捷键、输入法、复杂组合键及左右修饰键仍有平台差异，不能视为已经全部支持。
+
+## Windows 控制 Mac：滚轮、侧键和快捷键（beta.11）
+
+- **滚轮**：控制端直接读取 Win32 Raw Input 的纵向/横向滚动数据（每格标准值 120，细滚轮会累计小数），再发送原生 macOS 行滚动事件。控制端「偏好设置 → 远端滚轮速度」默认 3 行/格，可调整 1～10 行/格。
+- **侧键**：Windows 的 XBUTTON1/XBUTTON2 会跨机传输。Mac 默认把侧键按下映射为 `⌘[`（后退）和 `⌘]`（前进）；接收端「偏好设置 → 鼠标侧键」可改为原生 Mouse Button 4/5。鼠标厂商专有的 Windows 宏、驱动自定义组合键并不会自动同步到 Mac，必须由目标系统或本工具显式映射。
+- **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
+- **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
 
 ## 剪贴板：只在粘贴时传输
 

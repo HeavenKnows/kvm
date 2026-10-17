@@ -90,12 +90,19 @@ mod platform {
         for (down,up,button) in [
             (0x0001,0x0002,rdev::Button::Left),
             (0x0004,0x0008,rdev::Button::Right),
-            (0x0010,0x0020,rdev::Button::Middle)
+            (0x0010,0x0020,rdev::Button::Middle),
+            (0x0040,0x0080,rdev::Button::Unknown(3)), // XBUTTON1 (back)
+            (0x0100,0x0200,rdev::Button::Unknown(4)), // XBUTTON2 (forward)
         ] {
             if flags&down!=0 {result.push((button,true));}
             if flags&up!=0 {result.push((button,false));}
         }
         result
+    }
+    // Raw Win32 WHEEL_DELTA is 120; precision wheels can report fractions.
+    fn wheel_change(flags:u16,data:i16)->(i32,i32){
+        (if flags&0x0800!=0 {data as i32}else{0},
+         if flags&0x0400!=0 {data as i32}else{0})
     }
     const HWND_MESSAGE:isize=-3;
 
@@ -158,6 +165,7 @@ mod platform {
                     let flags=ptr::read_unaligned(data.cast::<u16>());
                     // usButtonFlags lives at offset +4 in RAWMOUSE.
                     let button_flags=ptr::read_unaligned(data.add(4).cast::<u16>());
+                    let button_data=ptr::read_unaligned(data.add(6).cast::<i16>());
                     let dx=ptr::read_unaligned(data.add(12).cast::<i32>());
                     let dy=ptr::read_unaligned(data.add(16).cast::<i32>());
                     MOUSE_TARGET.with(|slot|{
@@ -168,6 +176,10 @@ mod platform {
                             if button_flags!=0 {
                                 for (button,pressed) in button_changes(button_flags) {
                                     target.add_native_button(button,pressed);
+                                }
+                                let (wheel_x,wheel_y)=wheel_change(button_flags,button_data);
+                                if wheel_x!=0||wheel_y!=0 {
+                                    target.add_native_wheel(wheel_x,wheel_y);
                                 }
                             }
                         }
@@ -228,9 +240,13 @@ mod tests {
     #[test]
     fn mouse_button_flag_mapping(){
         use rdev::Button;
-        let events=platform::button_changes(0x0001 | 0x0008 | 0x0010);
-        assert_eq!(events,vec![(Button::Left,true),(Button::Right,false),(Button::Middle,true)]);
+        let events=platform::button_changes(0x0001 | 0x0008 | 0x0010|0x0040|0x0200);
+        assert_eq!(events,vec![(Button::Left,true),(Button::Right,false),
+            (Button::Middle,true),(Button::Unknown(3),true),(Button::Unknown(4),false)]);
         assert!(platform::button_changes(0).is_empty());
+        assert_eq!(platform::wheel_change(0x0400,120),(0,120));
+        assert_eq!(platform::wheel_change(0x0400,-30),(0,-30));
+        assert_eq!(platform::wheel_change(0x0800,120),(120,0));
     }
     #[test]
     fn raw_input_registration_works() {

@@ -190,13 +190,18 @@ pub struct Settings {
     pub remote_display:usize,
     /// Multiplier for unaccelerated device-count deltas on the controller.
     pub mouse_speed:f32,
+    /// Wheel lines per 120 Windows Raw Input units; fractional wheels accumulate.
+    pub scroll_speed:f32,
+    /// On macOS, use native XButton events instead of Command+[ / Command+].
+    pub side_buttons_native:bool,
 }
 impl Default for Settings {
     fn default()->Self { Self {
         role_server: false, address:"192.168.1.10:24881".into(),
         secret:String::new(), layout:Layout::default(), remap:true, clipboard:true,
         language:Language::Zh, listen_port:24881, auto_start_receiver:true,
-        mouse_speed:1.6,local_display:0,remote_display:0,
+        mouse_speed:1.6,scroll_speed:3.0,side_buttons_native:false,
+        local_display:0,remote_display:0,
     } }
 }
 
@@ -222,6 +227,9 @@ pub fn load()->Settings {
             if s.listen_port < 1024 {s.listen_port=24881;}
             if !s.mouse_speed.is_finite() || !(0.5..=4.0).contains(&s.mouse_speed) {
                 s.mouse_speed=1.6;
+            }
+            if !s.scroll_speed.is_finite() || !(1.0..=10.0).contains(&s.scroll_speed){
+                s.scroll_speed=3.0;
             }
             s
         })

@@ -16,6 +16,7 @@ mod mac {
         fn CGWarpMouseCursorPosition(p:Point)->i32;
         fn CGEventCreateMouseEvent(source:*const c_void,event_type:u32,point:Point,button:u32)->*mut c_void;
         fn CGEventPost(tap_location:u32,event:*mut c_void);
+        fn CGEventCreateScrollWheelEvent(source:*const c_void,units:u32,wheel_count:u32,...) -> *mut c_void;
         fn AXIsProcessTrusted()->bool;
     }
     #[link(name="CoreFoundation",kind="framework")]
@@ -32,6 +33,10 @@ mod mac {
             (rdev::Button::Right,false)=>Some((4,1)),
             (rdev::Button::Middle,true)=>Some((25,2)),
             (rdev::Button::Middle,false)=>Some((26,2)),
+            (rdev::Button::Unknown(3),true)=>Some((25,3)),
+            (rdev::Button::Unknown(3),false)=>Some((26,3)),
+            (rdev::Button::Unknown(4),true)=>Some((25,4)),
+            (rdev::Button::Unknown(4),false)=>Some((26,4)),
             _=>None,
         }
     }
@@ -95,6 +100,8 @@ mod mac {
             assert_eq!(button_mapping(rdev::Button::Right,false),Some((4,1)));
             assert_eq!(button_mapping(rdev::Button::Middle,true),Some((25,2)));
             assert_eq!(button_mapping(rdev::Button::Middle,false),Some((26,2)));
+            assert_eq!(button_mapping(rdev::Button::Unknown(3),true),Some((25,3)));
+            assert_eq!(button_mapping(rdev::Button::Unknown(4),false),Some((26,4)));
             assert_eq!(movement_kind(Some(rdev::Button::Left)),(6,0));
             assert_eq!(movement_kind(Some(rdev::Button::Right)),(7,1));
             assert_eq!(movement_kind(Some(rdev::Button::Middle)),(27,2));
@@ -103,6 +110,17 @@ mod mac {
     }
     pub fn dimensions()->(i32,i32){
         let s=crate::display::current().screen();(s.w,s.h)
+    }
+    pub fn scroll(x:i32,y:i32)->Result<(),String>{
+        if x==0 && y==0 {return Ok(());}
+        if !trusted(){return Err("macOS Accessibility permission is not granted".into());}
+        // kCGScrollEventUnitLine=1, wheel1 vertical, wheel2 horizontal.
+        // Raw Windows delta is normalized by the controller beforehand.
+        let event=unsafe{CGEventCreateScrollWheelEvent(std::ptr::null(),1,2,
+            y.clamp(-50,50),x.clamp(-50,50))};
+        if event.is_null(){return Err("Cannot create macOS scroll event".into());}
+        unsafe{CGEventPost(0,event);CFRelease(event);}
+        Ok(())
     }
     pub fn move_to(x:i32,y:i32)->Result<(),String>{
         let point=global_point(x,y);
@@ -148,6 +166,16 @@ pub fn move_and_notify(x:i32,y:i32)->Result<(),String>{
     {return mac::move_and_notify(x,y);}
     #[cfg(not(target_os="macos"))]
     {move_to(x,y)}
+}
+
+/// Send an OS-native scroll event. Call on the receiver's network worker.
+pub fn scroll(x:i32,y:i32)->Result<(),String>{
+    #[cfg(target_os="macos")]
+    {return mac::scroll(x,y);}
+    #[cfg(not(target_os="macos"))]
+    {rdev::simulate(&rdev::EventType::Wheel{
+        delta_x:x as i64,delta_y:y as i64
+    }).map_err(|e|format!("Cannot scroll: {e:?}"))}
 }
 
 /// Inject real low-level mouse down/up at the receiver's current cursor

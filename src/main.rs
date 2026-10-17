@@ -9,6 +9,8 @@ mod status;
 mod network;
 mod native_motion;
 mod native_cursor;
+#[cfg(target_os="macos")]
+mod native_keyboard;
 mod display;
 #[cfg(target_os="macos")]
 mod macos_tray;
@@ -692,6 +694,20 @@ impl KvmApp {
                 ui.small(tr(lang,"端口和密钥变更后，需要重启接收端并更新控制端配置。",
                     "After changing the port or key, restart the receiver and update the controller."));
             });
+            section_card(ui,tr(lang,"鼠标侧键","Extra mouse buttons"),|ui|{
+                let was=self.settings.side_buttons_native;
+                ui.checkbox(&mut self.settings.side_buttons_native,
+                    tr(lang,"发送原生鼠标第 4/5 键（而不是浏览器后退/前进）",
+                       "Send native mouse buttons 4/5 (instead of browser back/forward)"));
+                if was!=self.settings.side_buttons_native {
+                    self.state.side_buttons_native.store(
+                        self.settings.side_buttons_native,Ordering::SeqCst);
+                    self.persist_settings();
+                }
+                ui.small(tr(lang,
+                    "默认使用 ⌘[ / ⌘] 进行后退/前进；原生模式供支持扩展按键的应用使用。鼠标厂商软件的自定义宏不会自动跨系统复制。",
+                    "Default: Command+[ / Command+] for Back/Forward. Native mode sends buttons 4/5 to supporting apps. Vendor-specific macros are not automatically transferred."));
+            });
         }else{
             section_card(ui,tr(lang,"鼠标体验","Mouse & pointer"),|ui|{
                 ui.label(tr(lang,"远程鼠标灵敏度","Remote mouse sensitivity"));
@@ -703,6 +719,17 @@ impl KvmApp {
                 ui.small(tr(lang,
                     "Raw Input 不包含 Windows 系统鼠标加速，连接中也可调整。",
                     "Raw Input bypasses Windows acceleration; this updates live."));
+                ui.add_space(8.0);
+                ui.label(tr(lang,"远端滚轮速度（每格滚动行数）",
+                    "Remote wheel speed (lines per notch)"));
+                if ui.add(egui::Slider::new(&mut self.settings.scroll_speed,1.0..=10.0)
+                    .step_by(0.5).suffix("×")).changed(){
+                    self.state.set_scroll_speed(self.settings.scroll_speed);
+                    self.persist_settings();
+                }
+                ui.small(tr(lang,
+                    "使用 Windows 原生滚轮增量并累积高精度小数；支持纵向和横向滚动。",
+                    "Uses native Windows wheel deltas with fractional accumulation; vertical and horizontal scrolling."));
             });
         }
     }
@@ -715,6 +742,12 @@ impl KvmApp {
             ui.label(format!("{}: {}",tr(lang,"状态","Status"),status.text(lang)));
             ui.label(format!("{}: {}",tr(lang,"网络往返延迟","Network RTT"),
                 if rtt==u64::MAX{"—".to_string()}else{format!("{rtt} ms")}));
+            ui.label(format!("{}: {} ms",tr(lang,"本次连接 RTT 峰值","Session RTT peak"),
+                self.state.rtt_peak_ms.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {}",tr(lang,"Windows 原生滚轮数据包","Native wheel packets"),
+                self.state.wheel_packets.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {}",tr(lang,"侧键事件（Windows 捕获）","Side button events captured"),
+                self.state.side_button_packets.load(Ordering::Relaxed)));
             ui.label(format!("{}: {}",tr(lang,"原生鼠标数据包","Native mouse packets"),
                 self.state.native_motion_packets.load(Ordering::Relaxed)));
             ui.label(format!("{}: {} / {}",tr(lang,"鼠标按下 / 松开（捕获）","Mouse down/up captured"),
@@ -731,7 +764,7 @@ impl KvmApp {
             }
             if ui.button(tr(lang,"复制完整诊断","Copy full diagnostics")).clicked(){
                 let diagnostic=format!(
-                    "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nNetwork RTT: {:?} ms\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
+                    "kvm {}\nOS: {}\nRole: {}\nAddress: {}\nConfigured listening port: {}\nSession started: {}\nNetwork ready: {}\nMouse sensitivity: {:.1}x\nScroll speed: {:.1} lines/notch\nNetwork RTT: {:?} ms\nRTT peak: {} ms\nWheel packets: {}\nSide button events: {}\nNative mouse packets: {}\nMouse captured down/up: {}/{}\nMouse received down/up: {}/{}\nMouse injection failures: {}\nStatus: {}",
                     env!("CARGO_PKG_VERSION"),
                     std::env::consts::OS,
                     if self.settings.role_server{"receiver"}else{"controller"},
@@ -740,7 +773,11 @@ impl KvmApp {
                     self.state.started.load(Ordering::SeqCst),
                     self.state.ready.load(Ordering::SeqCst),
                     self.settings.mouse_speed,
+                    self.settings.scroll_speed,
                     if rtt==u64::MAX{None}else{Some(rtt)},
+                    self.state.rtt_peak_ms.load(Ordering::Relaxed),
+                    self.state.wheel_packets.load(Ordering::Relaxed),
+                    self.state.side_button_packets.load(Ordering::Relaxed),
                     self.state.native_motion_packets.load(Ordering::Relaxed),
                     self.state.mouse_down_captured.load(Ordering::Relaxed),
                     self.state.mouse_up_captured.load(Ordering::Relaxed),
