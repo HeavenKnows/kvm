@@ -56,15 +56,26 @@ pub fn start()->Result<(),String>{
     if !original_script.is_file(){
         return Err("此版本不含图形更新组件，请安装 beta.21 或更新版本".into());
     }
-    let source=if bundle==Path::new(INSTALL_PATH) {
-        choose_dmg()?
-    }else{
-        // Running the app directly from the newly downloaded DMG:
-        // one click installs THIS version without any file chooser.
-        bundle
-    };
     let millis=SystemTime::now().duration_since(UNIX_EPOCH)
         .unwrap_or_default().as_millis();
+    let (source,staged_app_dir)=if bundle==Path::new(INSTALL_PATH) {
+        (choose_dmg()?,None)
+    }else{
+        // Gatekeeper App Translocation can unmount its randomized read-only
+        // location as soon as the first-run application quits. Clone this
+        // signed bundle BEFORE quitting, so the helper has a durable input.
+        let staging=std::env::temp_dir()
+            .join(format!("kvm-source-{}-{millis}",std::process::id()));
+        fs::create_dir(&staging).map_err(|e|format!("无法准备安装目录：{e}"))?;
+        let snapshot=staging.join("kvm.app");
+        let copied=Command::new("/usr/bin/ditto").arg(&bundle).arg(&snapshot)
+            .status().map_err(|e|format!("无法复制安装包：{e}"))?;
+        if !copied.success(){
+            let _=fs::remove_dir_all(&staging);
+            return Err("无法准备安装包，请重新打开 DMG".into());
+        }
+        (snapshot,Some(staging))
+    };
     let script_copy=std::env::temp_dir()
         .join(format!("kvm-updater-{}-{millis}.sh",std::process::id()));
     let script=fs::read(&original_script).map_err(|e|format!("无法读取安装组件：{e}"))?;
@@ -82,6 +93,8 @@ pub fn start()->Result<(),String>{
         .arg(&script_copy).arg("--gui").arg("--wait-pid")
         .arg(std::process::id().to_string()).arg(&source)
         .env("KVM_INSTALL_SCRIPT_COPY","1")
+        .env("KVM_STAGED_APP_DIRECTORY",staged_app_dir.as_deref()
+            .unwrap_or_else(||Path::new("")))
         .stdin(Stdio::null()).stdout(Stdio::from(log)).stderr(Stdio::from(err_log))
         .spawn().map_err(|e|format!("更新程序无法启动：{e}"))?;
     Ok(())

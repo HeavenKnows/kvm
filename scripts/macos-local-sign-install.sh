@@ -35,6 +35,16 @@ clean(){
   if [[ "${KVM_INSTALL_SCRIPT_COPY:-}" == 1 && "$GUI" == 1 ]];then
     rm -f -- "$0"
   fi
+  # Clean only the temporary bundle snapshot prepared by macos_update.rs.
+  # Never accept an arbitrary directory to delete.
+  if [[ "$GUI" == 1 && -n "${KVM_STAGED_APP_DIRECTORY:-}" ]];then
+    staged="${KVM_STAGED_APP_DIRECTORY%/}"
+    temp_root="${TMPDIR:-/tmp}"
+    if [[ "${staged##*/}" == kvm-source-* &&
+          "${staged%/*}" == "${temp_root%/}" ]];then
+      /bin/rm -rf -- "$staged"
+    fi
+  fi
 }
 trap clean EXIT
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]];then
