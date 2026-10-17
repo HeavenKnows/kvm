@@ -9,11 +9,32 @@ DEST="/Applications/kvm.app"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP=""
 MOUNTED=0
-err(){ echo "kvm: $*" >&2; exit 1; }
+GUI=0
+WAIT_PID=""
+if [[ "${1:-}" == "--gui" ]];then
+  GUI=1;shift
+  if [[ "${1:-}" == "--wait-pid" ]];then
+    WAIT_PID="${2:-}"
+    [[ "$WAIT_PID" =~ ^[0-9]+$ ]]||{ echo "Invalid updater PID" >&2;exit 1; }
+    shift 2
+  fi
+fi
+show_dialog(){
+  [[ "$GUI" == 1 ]]||return 0
+  /usr/bin/osascript -e 'on run argv
+    display dialog (item 1 of argv) buttons {"好"} default button 1 with title "kvm"
+  end run' "$1" >/dev/null 2>&1||true
+}
+err(){ echo "kvm: $*" >&2;show_dialog "安装失败。请查看 ~/Library/Logs/kvm-updater.log。$*";exit 1; }
 say(){ echo "kvm: $*"; }
 clean(){
   if [[ "$MOUNTED" == 1 ]];then hdiutil detach "$TMP/mount" -quiet >/dev/null 2>&1||true;fi
   if [[ -n "$TMP" && -d "$TMP" ]];then rm -rf "$TMP";fi
+  # The GUI updater uses a private disposable copy of this very script:
+  # deleting it does not change the installed signed app.
+  if [[ "${KVM_INSTALL_SCRIPT_COPY:-}" == 1 && "$GUI" == 1 ]];then
+    rm -f -- "$0"
+  fi
 }
 trap clean EXIT
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]];then
@@ -36,6 +57,13 @@ USAGE
 fi
 [[ "$(uname)" == Darwin ]]||err "Only supported on macOS."
 [[ "$(id -u)" != 0 ]]||err "Run without sudo."
+if [[ -n "$WAIT_PID" ]];then
+  for ((i=0;i<300;i++));do
+    kill -0 "$WAIT_PID" 2>/dev/null||break
+    sleep 0.1
+  done
+  kill -0 "$WAIT_PID" 2>/dev/null&&err "Old kvm is still running; quit it first."
+fi
 hash(){
   security find-identity -v -p codesigning 2>/dev/null|awk -F'"' -v cn="$NAME" \
     '$2==cn{n=$1;sub(/^[[:space:]]+[0-9]+\)[[:space:]]+/,"",n);gsub(/[[:space:]]/,"",n);print n;exit}'
@@ -116,7 +144,7 @@ codesign --verify --strict "$SOURCE" ||
   err "Downloaded kvm.app is modified or corrupt. Download it again from the project Actions."
 if pgrep -x kvm >/dev/null;then err "Quit running kvm from the menu bar first.";fi
 ditto "$SOURCE" "$TMP/kvm.app"
-h="$(setup|tail -n 1)"
+h="$(setup|tail -n 1)"||err "Could not initialize the personal signing certificate."
 [[ "$h" =~ ^[[:xdigit:]]{40}$ ]]||err "Invalid signing identity."
 req="designated => identifier \"$ID\" and certificate leaf = H\"$h\""
 codesign --force --sign "$h" --timestamp=none -r "$req" "$TMP/kvm.app"||
@@ -134,18 +162,42 @@ fi
 NEXT="/Applications/.kvm-next.app";BACKUP="/Applications/.kvm-prev.app"
 [[ ! -e "$NEXT" && ! -e "$BACKUP" ]]||err "Previous install incomplete (.kvm-next or .kvm-prev)."
 say "Installing to $DEST (administrator password may be requested)."
-sudo /usr/bin/ditto "$TMP/kvm.app" "$NEXT"
-# Verify as the login user so validation sees the user-scoped signing trust.
-if ! /usr/bin/codesign --verify --strict "$NEXT";then
-  sudo /bin/rm -rf "$NEXT";err "Copied app failed verification; old app unchanged."
+if [[ "$GUI" == 1 ]];then
+  # Build ONE privileged, transactional copy/rename command. Private
+  # code-signing keys are never used with root privileges.
+  shell_quote(){
+    local escaped="${1//\'/\'\\\'\'}"
+    printf "'%s'" "$escaped"
+  }
+  source_q="$(shell_quote "$TMP/kvm.app")"
+  admin_command="set -e; /usr/bin/ditto $source_q /Applications/.kvm-next.app; "
+  admin_command+=" /usr/bin/codesign --verify --strict /Applications/.kvm-next.app; "
+  admin_command+=" if test -e /Applications/kvm.app; then /bin/mv /Applications/kvm.app /Applications/.kvm-prev.app; fi; "
+  admin_command+=" if ! /bin/mv /Applications/.kvm-next.app /Applications/kvm.app; then "
+  admin_command+=" if test -e /Applications/.kvm-prev.app; then /bin/mv /Applications/.kvm-prev.app /Applications/kvm.app; fi; exit 1; fi; "
+  admin_command+=" if test -e /Applications/.kvm-prev.app; then /bin/rm -rf /Applications/.kvm-prev.app; fi"
+  # Quote for AppleScript's STRING literal, not for AppleScript code.
+  applescript_string="${admin_command//\\/\\\\}"
+  applescript_string="${applescript_string//\"/\\\"}"
+  /usr/bin/osascript -e "do shell script \"$applescript_string\" with administrator privileges" ||
+    err "Administrator authorization or installation failed."
+else
+  sudo /usr/bin/ditto "$TMP/kvm.app" "$NEXT"
+  if ! /usr/bin/codesign --verify --strict "$NEXT";then
+    sudo /bin/rm -rf "$NEXT";err "Copied app failed verification; old app unchanged."
+  fi
+  if [[ -e "$DEST" ]];then sudo /bin/mv "$DEST" "$BACKUP";fi
+  if ! sudo /bin/mv "$NEXT" "$DEST";then
+    if [[ -e "$BACKUP" ]];then sudo /bin/mv "$BACKUP" "$DEST";fi
+    err "Install failed; previous version restored."
+  fi
+  if [[ -e "$BACKUP" ]];then sudo /bin/rm -rf "$BACKUP";fi
 fi
-if [[ -e "$DEST" ]];then sudo /bin/mv "$DEST" "$BACKUP";fi
-if ! sudo /bin/mv "$NEXT" "$DEST";then
-  if [[ -e "$BACKUP" ]];then sudo /bin/mv "$BACKUP" "$DEST";fi
-  err "Install failed; previous version restored."
-fi
-if [[ -e "$BACKUP" ]];then sudo /bin/rm -rf "$BACKUP";fi
 say "Installed. Open /Applications/kvm.app."
+if [[ "$GUI" == 1 ]];then
+  /usr/bin/open "/Applications/kvm.app" ||
+    show_dialog "安装已完成，请从“应用程序”打开 kvm。"
+fi
 say "Reuse THIS updater for each release, not drag-and-drop."
 say "No Apple notarization: first-open approval may still be required."
 say "If macOS explicitly reports malware, do not override that security warning."

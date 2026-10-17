@@ -14,6 +14,8 @@ mod native_keyboard;
 mod display;
 #[cfg(target_os="macos")]
 mod macos_tray;
+#[cfg(target_os="macos")]
+mod macos_update;
 #[cfg(target_os="windows")]
 mod windows_tray;
 
@@ -320,6 +322,8 @@ struct KvmApp {
     tray:Option<macos_tray::MacMenuBar>,
     #[cfg(target_os="macos")]
     tray_attempted:bool,
+    #[cfg(target_os="macos")]
+    mac_update_error:Option<String>,
     #[cfg(target_os="windows")]
     win_tray:Option<windows_tray::WindowsTray>,
     #[cfg(target_os="windows")]
@@ -418,6 +422,8 @@ impl KvmApp {
             tray:None,
             #[cfg(target_os="macos")]
             tray_attempted:false,
+            #[cfg(target_os="macos")]
+            mac_update_error:None,
             #[cfg(target_os="windows")]
             win_tray:None,
             #[cfg(target_os="windows")]
@@ -716,6 +722,29 @@ impl KvmApp {
                 });
             }
         });
+        #[cfg(target_os="macos")]
+        {
+            ui.add_space(12.0);
+            // Native macOS GUI update. A fresh DMG offers one-click install;
+            // an installed copy offers the OS-native DMG chooser.
+            if ui.button(if macos_update::installed(){
+                tr(lang,"安装更新包…","Install update…")
+            }else{
+                tr(lang,"安装到应用程序","Install to Applications")
+            }).clicked(){
+                match macos_update::start(){
+                    Ok(())=>{
+                        self.persist_settings();
+                        self.state.stop();
+                        std::process::exit(0);
+                    },
+                    Err(error)=>self.mac_update_error=Some(error),
+                }
+            }
+            if let Some(error)=&self.mac_update_error{
+                ui.colored_label(egui::Color32::from_rgb(240,125,110),error);
+            }
+        }
         ui.add_space(12.0);
     }
 

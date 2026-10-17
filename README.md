@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.20，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.21，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -57,6 +57,14 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
 - **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
 
+## beta.21：Mac 图形安装/更新，日常不再使用终端
+
+首次下载后，在 DMG 里打开 `kvm.app`，在「概览」点击**安装到应用程序**，确认钥匙串及 macOS 管理员授权，自动安装到 `/Applications/kvm.app` 并启动。没有付费 Apple Developer ID 时，首次打开未公证应用仍可能需要在「系统设置 → 隐私与安全性 → 仍要打开」**人工确认一次**；这不可被程序绕过。
+
+**后续更新**：下载新的 `kvm-macos-arm64.dmg` 后，不需要在新 DMG 里打开 App。打开原来已安装的 `/Applications/kvm.app`，在「概览」点击**安装更新包…**，在 macOS 文件选择器中选下载的 DMG。程序启动后台安装器并退出自身；后台安装器验证下载包、**复用登录钥匙串中已有的个人签名证书**签署新版、弹出原生管理员授权框安装，然后自动打开新版本。这条路径没有终端指令、不双击未公证的 `.command`、不手动拖拽覆盖。遇到失败可查看 `~/Library/Logs/kvm-updater.log`，本机旧版本在正式替换前保留。
+
+程序内置签名更新脚本并由已安装的应用启动，下载的 DMG 只作为更新数据源；其本身仍是未公证的 Ad-hoc 包。**旧版 beta.20 没有应用内更新按钮**，所以需要从 beta.21 DMG 启动新 App 完成一次图形化迁移。若 Gatekeeper 不允许首次打开，可使用 DMG 根目录的 `install-kvm.sh` 作为备用终端入口，不是日常流程。**不要关闭 Gatekeeper/SIP，不要绕过明确的恶意软件警告**。CI 会检查双端编译及 macOS 安装脚本的语法，实际钥匙串和辅助功能权限继承仍需 Mac 实机测试。
+
 ## beta.20：Windows 托盘恢复设置、网络掉线清理、按角色显示状态
 
 - **Windows 托盘“打开设置”**：旧代码只标记重绘请求，但 eframe 隐藏窗口不一定继续绘制；托盘菜单单击/左键点击时现在直接用原生 Windows HWND + `ShowWindowAsync(SW_RESTORE/SW_SHOW)` 恢复窗口并尝试置前，然后通知 egui 重绘。保留 X→托盘、菜单退出→进程退出语义。
@@ -89,7 +97,7 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 
 **个人使用的新安装方式**（beta.19 起以 `install-kvm.sh` 代替早期的 `.command`）：Mac DMG 根目录提供个人签名安装脚本。它会在 Mac 本机登录钥匙串**只创建一次**有效期十年的 `kvm Local Code Signing` 自签名代码签名身份，之后重复使用同一张证书和私钥；只设置**当前用户的 Code Signing 信任策略**（不修改 SSL 信任、不关闭 Gatekeeper/SIP，也不直接写 TCC 数据库）。将下载的 `kvm.app` 先复制到临时目录，以固定的 `dev.heavenknows.kvm` Bundle ID 和该证书指纹作为指定代码要求重新签名，验证后才替换 `/Applications/kvm.app`。
 
-**beta.17 的旧 `.command` 流程已被 beta.19 替换。请遵循上面的 `install-kvm.sh` 终端安装方法。** 从旧 Ad-hoc 签名迁移这一次，可能还需要在「系统设置 → 隐私与安全性 → 辅助功能」重新勾选并重启应用。
+**历史说明：beta.17 的旧 `.command` 已在 beta.19 替换，beta.21 起正常安装/升级使用应用内按钮，不再需要终端。** 从旧 Ad-hoc 签名迁移这一次，可能还需要在「系统设置 → 隐私与安全性 → 辅助功能」重新勾选并重启应用。
 
 **未来每次更新**重复 1～3：使用 DMG 里的**安装/更新脚本**，**不要再将 app 从 DMG 拖到“应用程序”覆盖旧版**，否则会用回每版不同哈希的 CI Ad-hoc 签名，权限仍会失效。安装后的程序必须始终从 `/Applications/kvm.app` 启动，避免路径变化影响系统权限身份识别。
 

@@ -86,7 +86,7 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>20</string>
+            <key>CFBundleVersion</key><string>21</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
@@ -98,7 +98,15 @@ jobs:
           # Settings UI are restored in src/macos_tray.rs / src/main.rs.
           test "$(plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" = true
           test ! -f "$APP/Contents/Resources/kvm.icns"
+          # Bundle the updater INSIDE the signed app. A user can now update
+          # from the already-installed stable-identity application without
+          # launching the newly downloaded unsigned/unnotarized script.
+          mkdir -p "$APP/Contents/Resources"
+          cp scripts/macos-local-sign-install.sh "$APP/Contents/Resources/install-kvm.sh"
+          chmod 644 "$APP/Contents/Resources/install-kvm.sh"
+          bash -n "$APP/Contents/Resources/install-kvm.sh"
           codesign --force --sign - --timestamp=none "$APP"
+          codesign --verify --strict "$APP"
           # The CI signing identity is ephemeral and cannot preserve TCC
           # grants across releases. Ship a self-contained LOCAL installer
           # that generates/reuses one key in the user's login keychain, then
@@ -115,25 +123,31 @@ jobs:
           cat > "dist/dmg-root/安装与更新 - READ ME.txt" <<'INSTRUCTIONS'
           kvm (macOS) 安装与更新 / Installation & Updates
 
-          1. 从 Mac 菜单栏完全退出旧版 kvm。
-          2. 在 Mac 上打开「终端」(Terminal)。
-          3. 在终端输入 /bin/bash 后跟一个空格，然后将本 DMG 中的
-             install-kvm.sh 文件拖入终端，按回车。
-             或在挂载卷名为 kvm 时运行：
-             /bin/bash "/Volumes/kvm/install-kvm.sh"
-          4. 按照提示允许登录钥匙串签名和必要的管理员文件安装操作。
-          5. 启动 /Applications/kvm.app。
+          首次安装：
+          1. 在 DMG 中打开 kvm.app。如果 macOS 阻止未公证应用，
+             可在确认来源后到“系统设置 → 隐私与安全性 → 仍要打开”
+             手动批准首次打开；不要关闭 Gatekeeper。
+          2. 在 kvm 的“概览”页点击“安装到应用程序”。
+          3. 根据系统提示批准登录钥匙串和管理员授权。
+             安装成功后新版 kvm 会从 /Applications/kvm.app 启动。
 
-          下次更新重复同样操作；不要将 kvm.app 从 DMG 拖拽覆盖！
-          拖拽会恢复临时签名，让「辅助功能」授权可能再次失效。
-          不要使用 sudo bash。首次换签名可能仍需重新授权一次。
-          没有 Apple 公证时，系统可能仍要求首次打开安全确认。
-          如明确报告“恶意软件”，不要绕过该警告。
+          以后更新：
+          1. 从 GitHub Actions 下载新的 DMG，无需双击其中的 App。
+          2. 在已安装的 kvm“概览”页点击“安装更新包…”并选择 DMG。
+          3. 程序自动退出旧版、签署并替换应用、打开新版。
+          不需要终端、双击脚本或拖拽覆盖 app。
 
-          English: Quit kvm. In Terminal type "/bin/bash " (with a trailing
-          space), drag this DMG's install-kvm.sh into Terminal, then Return.
-          Follow prompts, then open /Applications/kvm.app. Repeat for EACH
-          update; do NOT drag-install the app, which resets its code identity.
+          如首次因 Gatekeeper 完全无法打开，DMG 仍提供
+          install-kvm.sh 作为备用，可通过 /bin/bash 从终端执行；
+          它不是日常升级方式。首次更换代码身份可能再需授权一次。
+          没有开发者账号无法消除首次 Gatekeeper 安全确认。
+          如系统明确报告恶意软件，不应绕过告警。
+
+          English: Open kvm.app from the DMG and click Install to Applications.
+          Subsequent updates: in the INSTALLED kvm app click Install update,
+          select the new downloaded DMG; installation/signing happen via the
+          native macOS authorization prompt. No Terminal for routine updates.
+          Only first-time Gatekeeper approval may be required.
           INSTRUCTIONS
           test -f "dist/dmg-root/install-kvm.sh"
           test ! -e "dist/dmg-root/Install or Update kvm.command"
