@@ -628,6 +628,7 @@ impl KvmApp {
                         tr(lang,
                             "接收服务尚未监听。请点击下方「启动接收端」，否则 Windows 会被拒绝连接。",
                             "Receiver is not listening. Click Start receiver below or Windows connections will be refused."));
+                }
 
                 #[cfg(target_os="macos")]
                 if !native_cursor::accessibility_trusted(){
@@ -678,16 +679,6 @@ impl KvmApp {
             }
         });
         ui.add_space(12.0);
-        section_card(ui,tr(lang,"快速说明","Getting started"),|ui|{
-            ui.label(if self.settings.role_server{
-                tr(lang,"保持接收端运行，在 Windows 控制端输入本机地址和配对密钥。",
-                    "Keep the receiver running; enter this computer's address and pairing key on Windows.")
-            }else{
-                tr(lang,"连接后在「屏幕布局」中调整显示器位置，将鼠标移到相应屏幕边缘切换。",
-                    "After connecting, arrange displays on the Displays page and move the pointer across the shared edge.")
-            });
-
-        });
     }
 
     fn ui_displays(&mut self,ui:&mut egui::Ui,lang:Language){
