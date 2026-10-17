@@ -20,6 +20,8 @@ pub enum Wire {
     MoveBy { dx:i32, dy:i32 },
     /// Signed logical-pixel scroll after controller-side WHEEL_DELTA normalization.
     Scroll { dx:i32, dy:i32 },
+    /// One complete macOS Control+Arrow shortcut for Spaces/Mission Control.
+    MacControlArrow(rdev::Key),
     /// Diagnostic probe for the encrypted LAN transport.
     Ping(u64),
     Pong(u64),
@@ -251,7 +253,7 @@ mod clipboard_wire_tests {
     fn binary_clipboard_chunks_roundtrip() {
         for message in [Wire::ClipboardRequest, Wire::ClipboardBegin { bytes: 128 },
             Wire::ClipboardChunk(vec![0, 255, 1, 2]), Wire::ClipboardEnd,
-            Wire::Scroll{dx:-2,dy:3}] {
+            Wire::Scroll{dx:-2,dy:3}, Wire::MacControlArrow(rdev::Key::RightArrow)] {
             let bytes = rmp_serde::to_vec(&message).unwrap();
             let decoded: Wire = rmp_serde::from_slice(&bytes).unwrap();
             assert_eq!(format!("{message:?}"), format!("{decoded:?}"));
