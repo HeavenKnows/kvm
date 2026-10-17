@@ -63,8 +63,8 @@ impl UiStatus {
             AwaitingInfo => (if zh {"等待接收端信息…"} else {"Waiting for receiver information…"}).into(),
             Ready => (if zh {"已连接；将鼠标推到设置的屏幕边缘（F12 返回）"} else {"Connected; move to the configured screen edge (F12 to return)"}).into(),
             Returned => (if zh {"已返回本机"} else {"Returned to local computer"}).into(),
-            ClipboardUnavailable => (if zh {"本机剪贴板不是文本或超过 32 KiB，取消远程粘贴"} else {"Local clipboard unavailable or exceeds 32 KiB; paste cancelled"}).into(),
-            ClipboardInvalid => (if zh {"收到的剪贴板文本无效或超限"} else {"Received clipboard text is invalid or too large"}).into(),
+            ClipboardUnavailable => (if zh {"剪贴板没有可传输的文本、图片或文件，或超过 32 MiB（暂不支持文件夹）"} else {"Clipboard unavailable or exceeds 32 MiB (folders not supported)"}).into(),
+            ClipboardInvalid => (if zh {"接收到的剪贴板内容无效、超限或无法写入"} else {"Clipboard data invalid, oversized or cannot be written"}).into(),
             HandshakeTimedOut => (if zh {"等待接收端响应超时（5 秒），可重试"} else {"Receiver response timed out after 5 seconds; retry available"}).into(),
             InvalidHandshake => (if zh {"接收端响应无效，请检查版本与配对密钥"} else {"Invalid receiver response; check version and pairing key"}).into(),
             UserDisconnected => (if zh {"已主动断开"} else {"Disconnected by user"}).into(),
@@ -77,7 +77,7 @@ impl UiStatus {
             RemoteCursorPlaced => (if zh {"远端光标定位成功，等待鼠标位移"}else{"Remote cursor positioned; awaiting mouse deltas"}).into(),
             RemoteMouseMoving => (if zh {"正在接收远程鼠标位移"}else{"Receiving remote mouse deltas"}).into(),
             InputHookFailed(e) => format!("{}: {e}", if zh {"输入捕获启动失败"} else {"Input capture failed"}),
-            ClipboardRemoteEmpty => (if zh {"远端剪贴板没有可用纯文本"} else {"No plain text available in remote clipboard"}).into(),
+            ClipboardRemoteEmpty => (if zh {"远端剪贴板没有可用内容"} else {"No supported content in remote clipboard"}).into(),
         }
     }
 }

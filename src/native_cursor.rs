@@ -109,6 +109,15 @@ mod mac {
         let code=unsafe{CGWarpMouseCursorPosition(point)};
         if code==0{Ok(())}else{Err(format!("macOS cursor warp failed: CGError {code}"))}
     }
+    pub fn move_and_notify(x:i32,y:i32)->Result<(),String>{
+        // rdev::simulate for every MoveBy injects an additional high-level
+        // event; create the hover event directly with CoreGraphics instead.
+        move_to(x,y)?;
+        let event=unsafe{CGEventCreateMouseEvent(std::ptr::null(),5,global_point(x,y),0)};
+        if event.is_null(){return Err("Cannot create macOS mouse moved event".into());}
+        unsafe{CGEventPost(0,event);CFRelease(event);}
+        Ok(())
+    }
 }
 /// Update macOS global-coordinate origin after the background monitor scan.
 pub fn set_global_origin(x:i32,y:i32){
@@ -131,6 +140,14 @@ pub fn move_to(x:i32,y:i32)->Result<(),String>{
      rdev::simulate(&rdev::EventType::MouseMove{
          x:(x+desktop.origin_x) as f64,y:(y+desktop.origin_y) as f64})
         .map_err(|e|format!("Cannot simulate mouse movement: {e:?}"))}
+}
+
+/// Warp and notify hover on macOS without the rdev high-level simulation path.
+pub fn move_and_notify(x:i32,y:i32)->Result<(),String>{
+    #[cfg(target_os="macos")]
+    {return mac::move_and_notify(x,y);}
+    #[cfg(not(target_os="macos"))]
+    {move_to(x,y)}
 }
 
 /// Inject real low-level mouse down/up at the receiver's current cursor

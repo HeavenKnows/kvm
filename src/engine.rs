@@ -1,7 +1,6 @@
-use crate::{display,input,native_cursor,native_motion, model::{self,Display,Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
+use crate::{clipboard,display,input,native_cursor,native_motion, model::{self,Display,Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
 use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,atomic::{AtomicBool,AtomicI32,AtomicU32,AtomicU64,Ordering},mpsc::{self,SyncSender}},time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
-const MAX_TEXT:usize=32*1024;
 
 #[derive(Clone,Copy,PartialEq,Eq,Debug)]
 enum Owner { Local, Remote }
@@ -251,14 +250,6 @@ impl Shared {
         *self.motion_fraction.lock().unwrap()=MotionScale::default();
     }
 }
-fn clipboard_get()->Option<String>{
-    let mut c=arboard::Clipboard::new().ok()?;
-    c.get_text().ok().filter(|s|s.len()<=MAX_TEXT)
-}
-fn clipboard_set(s:&str)->bool {
-    if s.len()>MAX_TEXT {return false;}
-    arboard::Clipboard::new().and_then(|mut c|c.set_text(s.to_owned())).is_ok()
-}
 fn simulate(event:EventType){let _=rdev::simulate(&event);}
 fn paste_hotkey(os:Platform){
     let primary=match os {Platform::Windows=>Key::ControlLeft,Platform::Mac=>Key::MetaLeft};
@@ -266,6 +257,63 @@ fn paste_hotkey(os:Platform){
     simulate(EventType::KeyPress(Key::KeyV));
     simulate(EventType::KeyRelease(Key::KeyV));
     simulate(EventType::KeyRelease(primary));
+}
+
+fn clipboard_send_packet(shared:&Shared,mut packet:Wire)->bool {
+    // File/image chunks are sent only by workers; leave room for input and
+    // mouse events instead of filling the 2048-frame network queue.
+    let tx=match shared.out.lock().unwrap().clone(){
+        Some(tx)=>tx,None=>return false
+    };
+    for _ in 0..100 {
+        if !shared.ready.load(Ordering::Relaxed){return false;}
+        match tx.try_send(packet) {
+            Ok(())=>return true,
+            Err(mpsc::TrySendError::Full(value))=>{
+                packet=value;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(mpsc::TrySendError::Disconnected(_))=>return false,
+        }
+    }
+    shared.info(UiStatus::QueueOverflow);
+    false
+}
+fn send_clipboard_snapshot(shared:&Shared){
+    let bytes=match clipboard::snapshot(){
+        Ok(data)=>data,
+        Err(_)=>{shared.info(UiStatus::ClipboardUnavailable);return;}
+    };
+    if !clipboard_send_packet(shared,Wire::ClipboardBegin{bytes:bytes.len() as u32}){return;}
+    for chunk in bytes.chunks(clipboard::CHUNK_SIZE){
+        if !clipboard_send_packet(shared,Wire::ClipboardChunk(chunk.to_vec())){return;}
+        // Do not saturate the same TCP stream carrying real-time cursor input.
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let _=clipboard_send_packet(shared,Wire::ClipboardEnd);
+}
+fn start_clipboard_inbound(shared:Arc<Shared>)->mpsc::Sender<clipboard::Incoming>{
+    let (tx,rx)=mpsc::channel();
+    std::thread::spawn(move || clipboard::receive_loop(rx,|bytes|{
+        if !shared.ready.load(Ordering::SeqCst){return;}
+        // A slow file transfer must not paste into the wrong machine after
+        // the user has switched sides.
+        let receiver=shared.is_receiver.load(Ordering::SeqCst);
+        if shared.active.load(Ordering::SeqCst)!=receiver {return;}
+        match clipboard::install(&bytes){
+            Ok(())=>{
+                if !receiver {*shared.owner.lock().unwrap()=Owner::Local;}
+                // Allow Finder/Explorer to observe the new pasteboard flavor.
+                std::thread::sleep(Duration::from_millis(30));
+                if shared.ready.load(Ordering::SeqCst)
+                    && shared.active.load(Ordering::SeqCst)==receiver {
+                    paste_hotkey(Platform::local());
+                }
+            }
+            Err(_)=>shared.info(UiStatus::ClipboardInvalid),
+        }
+    }));
+    tx
 }
 
 // The receiver keeps listening after a client disconnects. Only one client is
@@ -335,16 +383,29 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
             shared.ready.store(true,Ordering::SeqCst);
             shared.info(UiStatus::ConnectedPeer(peer.to_string()));
             shared.send(Wire::Hello{os:Platform::local(),screen:shared.local_screen(),displays:shared.local_displays().clone()});
+            let receiver_displays=shared.local_displays();
             let mut mouse=(shared.local_screen().w/2,shared.local_screen().h/2);
             let mut pressed=HashSet::<Key>::new();
             let mut buttons=HashSet::<rdev::Button>::new();
-            let mut return_display=shared.local_displays()[0];
+            let mut return_display=receiver_displays[0];
+            let incoming_clipboard=start_clipboard_inbound(shared.clone());
+            let (clipboard_request_tx,clipboard_request_rx)=mpsc::sync_channel::<()>(4);
+            let clipboard_sender=shared.clone();
+            std::thread::spawn(move||{
+                while clipboard_request_rx.recv().is_ok(){
+                    if !clipboard_sender.ready.load(Ordering::Relaxed){break;}
+                    send_clipboard_snapshot(&clipboard_sender);
+                }
+            });
+            let mut buffered=None::<Wire>;
             let mut armed_return=false;
             let mut first_motion_seen=false;
             let mut entered_at=None::<std::time::Instant>;
             loop {
                 if shared.stop_requested.load(Ordering::SeqCst){break;}
-                let msg=match rx.recv_timeout(Duration::from_millis(80)){
+                let msg=match buffered.take(){
+                    Some(msg)=>msg,
+                    None=>match rx.recv_timeout(Duration::from_millis(80)){
                     Ok(msg)=>msg,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{
                         // Fail open: never strand the controller on its screen
@@ -359,13 +420,29 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         continue;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected)=>break,
+                    }
                 };
+                // Merge only consecutive motion frames. A key/button/clipboard
+                // frame is an ordering barrier, so drags keep their semantics.
+                let msg=if let Wire::MoveBy{mut dx,mut dy}=msg{
+                    for _ in 0..64{
+                        match rx.try_recv(){
+                            Ok(Wire::MoveBy{dx:x,dy:y})=>{
+                                dx=dx.saturating_add(x);
+                                dy=dy.saturating_add(y);
+                            }
+                            Ok(other)=>{buffered=Some(other);break;}
+                            Err(_)=>break,
+                        }
+                    }
+                    Wire::MoveBy{dx,dy}
+                }else{msg};
                 match msg {
                     Wire::Enter{x,y,side,remote_display}=>{
                         let mut l=*shared.layout.lock().unwrap();l.side=side;
                         *shared.layout.lock().unwrap()=l;
-                        return_display=shared.local_displays().get(remote_display)
-                            .copied().unwrap_or(shared.local_displays()[0]);
+                        return_display=receiver_displays.get(remote_display)
+                            .copied().unwrap_or(receiver_displays[0]);
                         if !return_display.contains(x,y) {
                             shared.send(Wire::EnterAck{accepted:false});
                             continue;
@@ -373,14 +450,8 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         mouse=return_display.closest(x,y);
                         // CGWarpMouseCursorPosition moves the *visible* macOS
                         // cursor. Its coordinates must be in logical points.
-                        match native_cursor::move_to(mouse.0,mouse.1){
+                        match native_cursor::move_and_notify(mouse.0,mouse.1){
                             Ok(())=>{
-                                // Also post a MouseMoved event for app hover state.
-                                if cfg!(target_os="macos"){
-                                    simulate(EventType::MouseMove{
-                                    x:(mouse.0+shared.virtual_origin().0) as f64,
-                                    y:(mouse.1+shared.virtual_origin().1) as f64});
-                                }
                                 shared.active.store(true,Ordering::SeqCst);
                                 armed_return=false;
                                 first_motion_seen=false;
@@ -412,7 +483,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         first_motion_seen=true;
                         entered_at=None;
                         let candidate=(mouse.0.saturating_add(dx),mouse.1.saturating_add(dy));
-                        mouse=model::closest_on_displays(&shared.local_displays(),candidate.0,candidate.1);
+                        mouse=model::closest_on_displays(&receiver_displays,candidate.0,candidate.1);
                         // A pressed mouse button requires Cocoa dragged events.
                         // Ordinary MouseMoved / cursor warps only update the
                         // pointer; macOS can defer window movement until mouse-up.
@@ -425,17 +496,12 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                         }else{None};
                         let moved=if let Some(button)=held{
                             native_cursor::drag_to(mouse.0,mouse.1,button)
-                        }else{native_cursor::move_to(mouse.0,mouse.1)};
+                        }else{native_cursor::move_and_notify(mouse.0,mouse.1)};
                         if let Err(e)=moved{
                             shared.active.store(false,Ordering::SeqCst);
                             shared.info(UiStatus::InputHookFailed(e));
                             shared.send(Wire::Back);
                             continue;
-                        }
-                        if held.is_none() && cfg!(target_os="macos"){
-                            simulate(EventType::MouseMove{
-                                    x:(mouse.0+shared.virtual_origin().0) as f64,
-                                    y:(mouse.1+shared.virtual_origin().1) as f64});
                         }
                         // Safe edge-return: derived from the *network cursor
                         // model*, never the injected event observer. Require
@@ -492,10 +558,18 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                             other=>simulate(other),
                         }
                     }
-                    Wire::PasteRemote(text) if shared.active.load(Ordering::Relaxed)=>{
-                        if clipboard_set(&text){paste_hotkey(Platform::local());}
+                    Wire::ClipboardRequest if shared.clipboard.load(Ordering::Relaxed)=>{
+                        let _=clipboard_request_tx.try_send(());
                     }
-                    Wire::ClipboardRequest=>shared.send(Wire::ClipboardReply(clipboard_get())),
+                    Wire::ClipboardBegin{bytes}=>{
+                        let _=incoming_clipboard.send(clipboard::Incoming::Begin(bytes));
+                    }
+                    Wire::ClipboardChunk(bytes)=>{
+                        let _=incoming_clipboard.send(clipboard::Incoming::Chunk(bytes));
+                    }
+                    Wire::ClipboardEnd=>{
+                        let _=incoming_clipboard.send(clipboard::Incoming::End);
+                    }
                     Wire::Ping(tick)=>shared.send(Wire::Pong(tick)),
                     _=>{}
                 }
@@ -600,19 +674,23 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     let work_shared=shared.clone();
     std::thread::spawn(move ||{
         while paste_rx.recv().is_ok(){
-            if let Some(text)=clipboard_get(){work_shared.send(Wire::PasteRemote(text));}
-            else {work_shared.info(UiStatus::ClipboardUnavailable);}
+            if !work_shared.ready.load(Ordering::Relaxed){break;}
+            send_clipboard_snapshot(&work_shared);
         }
     });
+    let incoming_clipboard=start_clipboard_inbound(shared.clone());
     let motion_shared=shared.clone();
     std::thread::spawn(move ||{
         let mut last_probe=Instant::now()-Duration::from_secs(1);
+        let mut last_motion=Instant::now();
         while motion_shared.ready.load(Ordering::Relaxed) {
             if last_probe.elapsed()>=Duration::from_secs(1){
                 last_probe=Instant::now();
                 motion_shared.send(Wire::Ping(motion_shared.clock.elapsed().as_millis() as u64));
             }
-            if motion_shared.active.load(Ordering::Relaxed){
+            if motion_shared.active.load(Ordering::Relaxed)
+                && last_motion.elapsed()>=Duration::from_millis(8){
+                last_motion=Instant::now();
                 motion_shared.flush_motion();
             }
             if motion_shared.pending_enter.load(Ordering::Relaxed){
@@ -658,13 +736,15 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
                 shared.return_cursor();
                 shared.info(UiStatus::Returned);
             }
-            Wire::ClipboardReply(Some(text))=>{
-                if clipboard_set(&text){
-                    *shared.owner.lock().unwrap()=Owner::Local;
-                    paste_hotkey(Platform::local());
-                } else {shared.info(UiStatus::ClipboardInvalid);}
+            Wire::ClipboardBegin{bytes}=>{
+                let _=incoming_clipboard.send(clipboard::Incoming::Begin(bytes));
             }
-            Wire::ClipboardReply(None)=>shared.info(UiStatus::ClipboardRemoteEmpty),
+            Wire::ClipboardChunk(bytes)=>{
+                let _=incoming_clipboard.send(clipboard::Incoming::Chunk(bytes));
+            }
+            Wire::ClipboardEnd=>{
+                let _=incoming_clipboard.send(clipboard::Incoming::End);
+            }
             _=>{}
         }
     }

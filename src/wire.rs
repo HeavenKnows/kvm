@@ -21,11 +21,12 @@ pub enum Wire {
     /// Diagnostic probe for the encrypted LAN transport.
     Ping(u64),
     Pong(u64),
-    /// Text only; receiver sets clipboard before injecting V.
-    PasteRemote(String),
-    /// Request remote clipboard for a local paste.
+    /// Request the opposite peer's clipboard when pasting locally.
     ClipboardRequest,
-    ClipboardReply(Option<String>),
+    /// Size-bounded binary clipboard transfer: text, RGBA image or file list.
+    ClipboardBegin { bytes: u32 },
+    ClipboardChunk(Vec<u8>),
+    ClipboardEnd,
 }
 
 fn frame_write(s:&mut TcpStream, bytes:&[u8])->io::Result<()> {
@@ -238,5 +239,19 @@ mod network_probe_tests{
         let pong=rmp_serde::to_vec(&Wire::Pong(42)).unwrap();
         assert!(matches!(rmp_serde::from_slice::<Wire>(&ping).unwrap(),Wire::Ping(42)));
         assert!(matches!(rmp_serde::from_slice::<Wire>(&pong).unwrap(),Wire::Pong(42)));
+    }
+}
+
+#[cfg(test)]
+mod clipboard_wire_tests {
+    use super::*;
+    #[test]
+    fn binary_clipboard_chunks_roundtrip() {
+        for message in [Wire::ClipboardRequest, Wire::ClipboardBegin { bytes: 128 },
+            Wire::ClipboardChunk(vec![0, 255, 1, 2]), Wire::ClipboardEnd] {
+            let bytes = rmp_serde::to_vec(&message).unwrap();
+            let decoded: Wire = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(format!("{message:?}"), format!("{decoded:?}"));
+        }
     }
 }

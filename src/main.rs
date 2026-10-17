@@ -4,6 +4,7 @@ mod model;
 mod wire;
 mod input;
 mod engine;
+mod clipboard;
 mod status;
 mod network;
 mod native_motion;
@@ -638,8 +639,8 @@ impl KvmApp {
                 self.persist_settings();
             }
             if ui.checkbox(&mut self.settings.clipboard,
-                tr(lang,"剪贴板按需同步（仅纯文本）",
-                    "Clipboard on demand (plain text only)")).changed(){
+                tr(lang,"剪贴板按需同步（文本、图片、文件；单次最多 32 MiB）",
+                    "Clipboard on demand (text, images, files; 32 MiB per paste)")).changed(){
                 self.state.clipboard.store(self.settings.clipboard,Ordering::SeqCst);
                 self.persist_settings();
             }
