@@ -1,6 +1,6 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
-> **版本：0.5.0-beta.19，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
+> **版本：0.5.0-beta.20，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么
 
@@ -56,6 +56,14 @@ macOS 需要为运行程序（或启动它的终端）在 **系统设置 → 隐
 - **侧键**：Windows 的 XBUTTON1/XBUTTON2 会跨机传输。Mac 默认把侧键按下映射为 `⌘[`（后退）和 `⌘]`（前进）；接收端「偏好设置 → 鼠标侧键」可改为原生 Mouse Button 4/5。鼠标厂商专有的 Windows 宏、驱动自定义组合键并不会自动同步到 Mac，必须由目标系统或本工具显式映射。
 - **组合键**：Mac 端使用 Core Graphics 原生键码及 `FlagsChanged` + Command/Shift/Control/Option flags，按下和释放必须成对发送；收到断开/返回事件时释放残留按键，避免卡键。暂不透传 Windows Fn/Globe 键，以防误触发 macOS 听写；系统保留快捷键、IME 和非美式键盘布局仍需 Mac 实机验证。
 - **鼠标卡顿诊断**：看「运行诊断 → Network RTT / Session RTT peak」。如果鼠标停顿时 RTT 峰值一起跳高，可能与 Wi-Fi 拥塞、干扰或漫游有关；如果 RTT 稳定而只有光标跳动，更应检查 Mac 注入事件、权限、负载和显示器拓扑。应用 RTT 只每秒探测一次，不能代替操作系统连续 ping/丢包监控。
+
+## beta.20：Windows 托盘恢复设置、网络掉线清理、按角色显示状态
+
+- **Windows 托盘“打开设置”**：旧代码只标记重绘请求，但 eframe 隐藏窗口不一定继续绘制；托盘菜单单击/左键点击时现在直接用原生 Windows HWND + `ShowWindowAsync(SW_RESTORE/SW_SHOW)` 恢复窗口并尝试置前，然后通知 egui 重绘。保留 X→托盘、菜单退出→进程退出语义。
+- **Wi-Fi 切换**：后台网卡监视每 2 秒检查地址。若当前 TCP 会话绑定的本机 IP 已经不在网卡列表中，会直接停止这个会话；与会话无关的 VPN/其他网卡地址变化不会误断。即使设置窗口被隐藏到托盘，后台检查仍有效。
+- **对端消失/强制退出**：控制端每秒的现有 Ping/Pong 机制新增 **8 秒无 Pong 超时**；接收端检测 8 秒无任何客户端消息（旧版控制端也每秒发 Ping），对半开 TCP 主动释放按键、鼠标状态和连接，恢复等待状态。与旧版客户端通信兼容。正常退出通过 TCP 关闭会更快触发。
+- **按角色生成状态文字**：控制端才显示“正在控制另一台电脑 · F12 返回本机”，接收端显示“正在接受另一台电脑的控制”。无论 Windows 或 Mac 承担哪个角色，网络地址变动提示、连接被拒绝提示都不再预设另一端是什么操作系统。
+- **测试**：覆盖心跳超时边界、当前连接 IP 消失与 VPN 地址变化、控制端/接收端两种状态文案，双平台 Rust 单测和 Release 构建。Windows 托盘窗口恢复和 Wi-Fi 断链仍需实机验收。
 
 ## beta.19：macOS 安装脚本不再触发 Finder 双击拦截
 

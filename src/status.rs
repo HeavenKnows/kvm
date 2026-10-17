@@ -30,6 +30,8 @@ pub enum UiStatus {
     Stopped,
     PeerDisconnected(String),
     TransportClosed(String),
+    HeartbeatTimedOut,
+    NetworkChanged,
     MouseEntryRejected,
     MouseEntryTimedOut,
     MouseNoMovement,
@@ -50,14 +52,14 @@ impl UiStatus {
             Authenticating(peer) => format!("{} {peer}…", if zh {"正在验证"} else {"Authenticating"}),
             PairingFailed(e) => format!("{}: {e}", if zh {"配对失败"} else {"Pairing failed"}),
             ConnectedPeer(peer) => format!("{} {peer}", if zh {"已连接"} else {"Connected to"}),
-            Disconnected => (if zh {"连接已断开；请重新启动应用以连接"} else {"Disconnected; restart the app to reconnect"}).into(),
+            Disconnected => (if zh {"连接已断开；可重新连接"} else {"Disconnected; reconnect to try again"}).into(),
             Connecting => (if zh {"正在连接…"} else {"Connecting…"}).into(),
             InvalidAddress => (if zh {"地址格式应为 IP:端口"} else {"Address must be IP:port"}).into(),
             ConnectFailed(e) => format!("{}: {e}", if zh {"网络连接失败"} else {"Connection failed"}),
             ConnectRefused(addr) => if zh {
-                format!("连接被拒绝（{addr}）：请在 Mac 接收端点击「启动接收端」，并核对 IP、端口和防火墙")
+                format!("连接被拒绝（{addr}）：请在接收端启动接收服务，并核对 IP、端口和防火墙")
             } else {
-                format!("Connection refused ({addr}): start the Mac receiver and check IP, port and firewall")
+                format!("Connection refused ({addr}): start the receiver and check IP, port and firewall")
             },
             NativeInputStarting => (if zh {"配对成功，正在初始化本机鼠标捕获…"} else {"Paired; initializing native mouse capture…"}).into(),
             AwaitingInfo => (if zh {"等待接收端信息…"} else {"Waiting for receiver information…"}).into(),
@@ -71,6 +73,8 @@ impl UiStatus {
             Stopped => (if zh {"已停止接收，可重新启动"} else {"Receiver stopped; you can start it again"}).into(),
             PeerDisconnected(detail) => format!("{}: {detail}",if zh {"上一个连接已结束"}else{"Previous peer disconnected"}),
             TransportClosed(detail) => format!("{}: {detail}",if zh {"加密连接中断"}else{"Encrypted session closed"}),
+            HeartbeatTimedOut => (if zh {"对端心跳超时，连接已断开"}else{"Peer heartbeat timed out; session disconnected"}).into(),
+            NetworkChanged => (if zh {"本机网络地址已切换，旧连接已断开"}else{"Local network address changed; old session disconnected"}).into(),
             MouseEntryRejected => (if zh {"远端光标定位失败，仍可在本机操作"}else{"Remote cursor placement failed; stayed local"}).into(),
             MouseEntryTimedOut => (if zh {"远端未确认鼠标进入，仍可在本机操作"}else{"Remote entry was not acknowledged; stayed local"}).into(),
             MouseNoMovement => (if zh {"远端未收到鼠标位移，已自动返回本机"}else{"No remote movement received; returned automatically"}).into(),

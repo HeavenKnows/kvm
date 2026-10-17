@@ -4,6 +4,34 @@
 #![cfg(target_os="windows")]
 use crate::{engine::Shared,model::Language};
 use eframe::egui;
+use raw_window_handle::{HasWindowHandle,RawWindowHandle};
+
+// The egui context cannot wake a hidden native viewport reliably. Restore
+// the ORIGINAL HWND directly from the tray callback, regardless of repaint
+// delivery. ShowWindowAsync is safe from the tray menu's callback thread.
+#[link(name="user32")]
+extern "system" {
+    fn IsWindow(hwnd:isize)->i32;
+    fn ShowWindowAsync(hwnd:isize,cmd_show:i32)->i32;
+    fn SetForegroundWindow(hwnd:isize)->i32;
+}
+fn restore_native_window(hwnd:isize)->bool{
+    if hwnd==0 || unsafe{IsWindow(hwnd)}==0{return false;}
+    unsafe{
+        ShowWindowAsync(hwnd,9); // SW_RESTORE: un-minimize and make visible
+        ShowWindowAsync(hwnd,5); // SW_SHOW: also recover simply hidden windows
+        SetForegroundWindow(hwnd);
+    }
+    true
+}
+fn window_handle(frame:&eframe::Frame)->Result<isize,String>{
+    let handle=frame.window_handle().map_err(|e|format!("window handle: {e}"))?;
+    match handle.as_raw(){
+        RawWindowHandle::Win32(h)=>Ok(h.hwnd.get()),
+        _=>Err("not a Win32 HWND".into())
+    }
+}
+
 use std::sync::{Arc,atomic::{AtomicBool,Ordering}};
 use tray_icon::{Icon,TrayIcon,TrayIconBuilder,TrayIconEvent,MouseButton,MouseButtonState,
     menu::{Menu,MenuEvent,MenuItem}};
@@ -38,7 +66,8 @@ pub fn should_hide_close(tray_available:bool,quitting:bool)->bool{
     tray_available && !quitting
 }
 impl WindowsTray {
-    pub fn new(ctx:&egui::Context,language:Language,shared:Arc<Shared>)->Result<Self,String>{
+    pub fn new(ctx:&egui::Context,frame:&eframe::Frame,language:Language,shared:Arc<Shared>)->Result<Self,String>{
+        let hwnd=window_handle(frame)?;
         let open=MenuItem::new(
             if language==Language::Zh{"打开设置"}else{"Open settings"},true,None);
         let quit=MenuItem::new(
@@ -56,6 +85,9 @@ impl WindowsTray {
         let quit_shared=shared;
         MenuEvent::set_event_handler(Some(move |event:MenuEvent|{
             if event.id==open_id {
+                // Native show works even if the hidden eframe window is
+                // not receiving any paint events.
+                restore_native_window(hwnd);
                 will_open.store(true,Ordering::SeqCst);
                 menu_ctx.request_repaint();
             }else if event.id==quit_id {
@@ -74,6 +106,7 @@ impl WindowsTray {
         TrayIconEvent::set_event_handler(Some(move |event:TrayIconEvent|{
             if let TrayIconEvent::Click{button:MouseButton::Left,
                     button_state:MouseButtonState::Up,..}=event{
+                restore_native_window(hwnd);
                 click_open.store(true,Ordering::SeqCst);
                 click_ctx.request_repaint();
             }

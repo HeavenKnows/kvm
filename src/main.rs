@@ -97,6 +97,14 @@ fn tr(lang: Language, zh: &'static str, en: &'static str) -> &'static str {
     if lang == Language::Zh { zh } else { en }
 }
 
+fn active_session_label(language:Language,receiver:bool)->&'static str{
+    if receiver{
+        tr(language,"正在接受另一台电脑的控制","Receiving control from another computer")
+    }else{
+        tr(language,"正在控制另一台电脑 · F12 返回本机","Controlling remote computer · F12 to return")
+    }
+}
+
 fn side_name(side: Side, lang: Language) -> &'static str {
     match side {
         Side::Left => tr(lang, "左侧", "Left"),
@@ -356,14 +364,19 @@ impl KvmApp {
         // Never call get_if_addrs() from an egui event callback.
         let (ip_tx,ip_rx)=mpsc::channel();
         let (ip_refresh_tx,ip_refresh_rx)=mpsc::channel::<()>();
+        let network_state=state.clone();
         std::thread::spawn(move ||{
             launch_mark("network-monitor-start");
             let mut previous:Option<Vec<Ipv4Addr>>=None;
             loop {
                 let addresses=network::local_ipv4_addresses();
                 if previous.as_ref()!=Some(&addresses){
+                    if previous.is_some(){
+                        launch_mark("network-ip-change-detected");
+                        // Works even with the GUI hidden in the tray.
+                        network_state.disconnect_if_local_ip_lost(&addresses);
+                    }
                     if ip_tx.send(addresses.clone()).is_err(){break;}
-                    if previous.is_some(){launch_mark("network-ip-change-detected");}
                     previous=Some(addresses);
                 }
                 match ip_refresh_rx.recv_timeout(Duration::from_secs(2)){
@@ -615,9 +628,9 @@ impl KvmApp {
                 ui.separator();
                 ui.label(status.text(lang));
             });
-            if self.state.active.load(Ordering::Relaxed){
+            if connected && self.state.active.load(Ordering::Relaxed){
                 ui.colored_label(egui::Color32::from_rgb(72,192,139),
-                    tr(lang,"正在控制另一台电脑 · F12 返回本机","Controlling remote computer · F12 to return"));
+                    active_session_label(lang,self.settings.role_server));
             }
 
         });
@@ -651,8 +664,8 @@ impl KvmApp {
                 if !started {
                     ui.colored_label(egui::Color32::from_rgb(236,182,78),
                         tr(lang,
-                            "接收服务尚未监听。请点击下方「启动接收端」，否则 Windows 会被拒绝连接。",
-                            "Receiver is not listening. Click Start receiver below or Windows connections will be refused."));
+                            "接收服务尚未监听，请点击「启动接收端」。",
+                            "Receiver is not listening. Click Start receiver."));
                 }
 
                 #[cfg(target_os="macos")]
@@ -1031,7 +1044,7 @@ impl eframe::App for KvmApp {
             // Never hide the window if creating the tray failed.
             if !self.win_tray_attempted && self.frames>=2 {
                 self.win_tray_attempted=true;
-                match windows_tray::WindowsTray::new(ctx,self.settings.language,self.state.clone()){
+                match windows_tray::WindowsTray::new(ctx,_frame,self.settings.language,self.state.clone()){
                     Ok(tray)=>self.win_tray=Some(tray),
                     Err(error)=>self.win_tray_error=Some(error),
                 }
@@ -1158,8 +1171,8 @@ impl eframe::App for KvmApp {
                             .show(ui,|ui|{
                                 ui.colored_label(egui::Color32::YELLOW,
                                     tr(lang,
-                                        "检测到 Mac 网络地址变化。Windows 中保存的旧 IP 可能失效，请在「概览」复制最新 IP:端口并重新连接。",
-                                        "This Mac's IP address changed. The old address saved on Windows may no longer work. Copy the current IP:port from Overview and reconnect."));
+                                        "本机网络地址已变化，控制端保存的 IP 可能已失效。请核对最新 IP:端口后重新连接。",
+                                        "Local network address changed. Check the current IP:port on the controller and reconnect."));
                                 if ui.button(tr(lang,"知道了","Dismiss")).clicked(){
                                     self.ip_changed_notice=false;
                                 }
@@ -1343,5 +1356,17 @@ mod layout_drag_regression_tests{
         assert_eq!(snap.side,Side::Left);
         assert_eq!(snap.offset,220);
         assert_eq!(model::group_origin(snap,&local,&remote,0,0).0,-1920);
+    }
+}
+
+#[cfg(test)]
+mod role_specific_ui_tests{
+    use super::*;
+    #[test]
+    fn controller_and_receiver_labels_follow_role_not_operating_system(){
+        assert_eq!(active_session_label(Language::Zh,true),"正在接受另一台电脑的控制");
+        assert!(active_session_label(Language::En,true).starts_with("Receiving"));
+        assert!(active_session_label(Language::En,false).contains("F12"));
+        assert!(!active_session_label(Language::Zh,true).contains("F12"));
     }
 }

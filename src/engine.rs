@@ -1,6 +1,6 @@
 use crate::{clipboard,display,input,native_cursor,native_motion, model::{self,Display,Language,Layout,Platform,Screen,Settings}, status::UiStatus, wire::{self,Wire}};
 use rdev::{self,EventType,Key};
-use std::{collections::{HashSet,VecDeque},net::{TcpListener,TcpStream},sync::{Arc,Mutex,RwLock,atomic::{AtomicBool,AtomicI32,AtomicU32,AtomicU64,Ordering},mpsc::{self,SyncSender}},time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
+use std::{collections::{HashSet,VecDeque},net::{Ipv4Addr,TcpListener,TcpStream},sync::{Arc,Mutex,RwLock,atomic::{AtomicBool,AtomicI32,AtomicU32,AtomicU64,Ordering},mpsc::{self,SyncSender}},time::{Duration,Instant,SystemTime,UNIX_EPOCH}};
 
 #[derive(Clone,Copy,PartialEq,Eq,Debug)]
 enum Owner { Local, Remote }
@@ -49,6 +49,19 @@ impl MotionScale{
         (x,y)
     }
 }
+const HEARTBEAT_TIMEOUT:Duration=Duration::from_secs(8);
+
+fn heartbeat_timed_out(last_response:Instant,now:Instant)->bool{
+    now.saturating_duration_since(last_response)>=HEARTBEAT_TIMEOUT
+}
+fn transport_address_lost(socket_ip:std::net::IpAddr,addresses:&[Ipv4Addr])->bool{
+    match socket_ip{
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified()=>
+            !addresses.contains(&ip),
+        _=>false,
+    }
+}
+
 pub struct Shared {
     is_receiver:AtomicBool,
     pub status:Mutex<UiStatus>,
@@ -86,6 +99,7 @@ pub struct Shared {
     pub ready:AtomicBool,
     pub started:AtomicBool,
     stop_requested:AtomicBool,
+    network_changed:AtomicBool,
     socket:Mutex<Option<TcpStream>>,
     capture_started:AtomicBool,
     native_started:AtomicBool,
@@ -143,7 +157,8 @@ impl Shared {
             clipboard_ui_tx:Mutex::new(None),
             #[cfg(target_os="macos")]
             clipboard_ui_ctx:Mutex::new(None),
-            stop_requested:AtomicBool::new(false),socket:Mutex::new(None),
+            stop_requested:AtomicBool::new(false),
+            network_changed:AtomicBool::new(false),socket:Mutex::new(None),
             native_started:AtomicBool::new(false),
             clipboard:AtomicBool::new(s.clipboard),
             shortcuts:RwLock::new(input::ShortcutTable::compile(&s.shortcut_mappings)),
@@ -288,6 +303,27 @@ impl Shared {
         self.native_started.store(false,Ordering::SeqCst);
         self.shutdown_peer();
         self.fatal(UiStatus::InputHookFailed(error));
+    }
+    /// A Wi-Fi switch can leave TCP half-open indefinitely. Close only when
+    /// the interface IP used by THIS socket disappeared, not when an unrelated
+    /// VPN/secondary interface changes. Runs in the background IP monitor,
+    /// even when the GUI is hidden to the tray.
+    pub fn disconnect_if_local_ip_lost(&self,addresses:&[Ipv4Addr])->bool{
+        if !self.ready.load(Ordering::SeqCst){return false;}
+        let lost={
+            let socket=self.socket.lock().unwrap();
+            socket.as_ref().and_then(|s|s.local_addr().ok())
+                .is_some_and(|addr|transport_address_lost(addr.ip(),addresses))
+        };
+        if !lost{return false;}
+        self.network_changed.store(true,Ordering::SeqCst);
+        if self.active.load(Ordering::SeqCst)
+            && !self.is_receiver.load(Ordering::SeqCst){
+            self.return_cursor();
+        }
+        self.shutdown_peer();
+        self.info(UiStatus::NetworkChanged);
+        true
     }
     fn store_socket(&self,sock:&TcpStream)->std::io::Result<()> {
         *self.socket.lock().unwrap()=Some(sock.try_clone()?);
@@ -514,6 +550,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
     shared.is_receiver.store(true,Ordering::SeqCst);
     shared.stop_requested.store(false,Ordering::SeqCst);
+    shared.network_changed.store(false,Ordering::SeqCst);
     std::thread::spawn(move || {
         let listener=match TcpListener::bind(("0.0.0.0",s.listen_port)) {
             Ok(v)=>v,
@@ -593,8 +630,17 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
             let mut armed_return=false;
             let mut first_motion_seen=false;
             let mut entered_at=None::<std::time::Instant>;
+            // Controllers already emit Ping once per second, including
+            // beta.19 and earlier. Monitor inbound messages rather than
+            // adding new receiver-initiated Pings (old clients ignore them).
+            let mut last_received=Instant::now();
             loop {
                 if shared.stop_requested.load(Ordering::SeqCst){break;}
+                if heartbeat_timed_out(last_received,Instant::now()){
+                    shared.info(UiStatus::HeartbeatTimedOut);
+                    shared.shutdown_peer();
+                    break;
+                }
                 let msg=match buffered.take(){
                     Some(msg)=>msg,
                     None=>match rx.recv_timeout(Duration::from_millis(80)){
@@ -614,6 +660,7 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected)=>break,
                     }
                 };
+                last_received=Instant::now();
                 // Merge only consecutive motion frames. A key/button/clipboard
                 // frame is an ordering barrier, so drags keep their semantics.
                 let msg=if let Wire::MoveBy{mut dx,mut dy}=msg{
@@ -834,6 +881,7 @@ pub fn start_client(shared:Arc<Shared>, s:Settings){
     if shared.started.swap(true,Ordering::SeqCst){return;}
     shared.is_receiver.store(false,Ordering::SeqCst);
     shared.stop_requested.store(false,Ordering::SeqCst);
+    shared.network_changed.store(false,Ordering::SeqCst);
     *shared.fatal_error.lock().unwrap()=None;
     std::thread::spawn(move ||{
         let result=client_session(&shared,s);
@@ -942,10 +990,24 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
         }
     });
 
-    for msg in rx {
+    let mut last_pong=Instant::now();
+    loop {
         if shared.stop_requested.load(Ordering::SeqCst){break;}
+        let msg=match rx.recv_timeout(Duration::from_millis(250)){
+            Ok(msg)=>msg,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{
+                if heartbeat_timed_out(last_pong,Instant::now()){
+                    shared.shutdown_peer();
+                    return Err(UiStatus::HeartbeatTimedOut);
+                }
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)=>break,
+        };
         match msg {
+            Wire::Ping(tick)=>shared.send(Wire::Pong(tick)),
             Wire::Pong(tick)=>{
+                last_pong=Instant::now();
                 let current=shared.clock.elapsed().as_millis() as u64;
                 if current>=tick{
                     let rtt=current-tick;
@@ -987,6 +1049,7 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
         }
     }
     if shared.stop_requested.load(Ordering::SeqCst){Ok(())}
+    else if shared.network_changed.load(Ordering::SeqCst){Err(UiStatus::NetworkChanged)}
     else {Err(UiStatus::TransportClosed(Shared::transport_reason(&fault)))}
 }
 
@@ -1173,5 +1236,28 @@ mod tests {
         assert_eq!(paste_action(false,Owner::Local,true),PasteAction::Native);
         assert_eq!(paste_action(true,Owner::Remote,true),PasteAction::Native);
         assert_eq!(paste_action(true,Owner::Local,false),PasteAction::Native);
+    }
+}
+
+#[cfg(test)]
+mod session_liveness_tests{
+    use super::*;
+    #[test]
+    fn heartbeat_detects_silent_peer_without_waiting_for_tcp_eof(){
+        let t=Instant::now();
+        assert!(!heartbeat_timed_out(t,t+Duration::from_secs(7)));
+        assert!(heartbeat_timed_out(t,t+Duration::from_secs(8)));
+    }
+    #[test]
+    fn ip_change_closes_only_connection_on_removed_interface(){
+        let session_ip=std::net::IpAddr::V4(Ipv4Addr::new(192,168,20,40));
+        assert!(!transport_address_lost(session_ip,&[
+            Ipv4Addr::new(192,168,20,40),Ipv4Addr::new(10,8,0,1)]));
+        // A VPN disappeared, but the session interface survived.
+        assert!(!transport_address_lost(session_ip,&[Ipv4Addr::new(192,168,20,40)]));
+        // Same process switches from one Wi-Fi LAN to another.
+        assert!(transport_address_lost(session_ip,&[Ipv4Addr::new(192,168,50,40)]));
+        assert!(transport_address_lost(session_ip,&[]));
+        assert!(!transport_address_lost(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST),&[]));
     }
 }
