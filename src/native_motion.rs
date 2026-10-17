@@ -100,7 +100,7 @@ mod platform {
         result
     }
     // Raw Win32 WHEEL_DELTA is 120; precision wheels can report fractions.
-    fn wheel_change(flags:u16,data:i16)->(i32,i32){
+    pub(super) fn wheel_change(flags:u16,data:i16)->(i32,i32){
         (if flags&0x0800!=0 {data as i32}else{0},
          if flags&0x0400!=0 {data as i32}else{0})
     }
