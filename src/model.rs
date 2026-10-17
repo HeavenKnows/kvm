@@ -260,6 +260,42 @@ pub fn save(s:&Settings){
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn dropped_screens_snap_with_zero_gap_on_all_four_sides(){
+        // A freely dragged remote rectangle from any side must end with
+        // exactly touching edges. No intermediate snapping during drag.
+        let local=single_display(Screen::new(1920,1080));
+        let remote=single_display(Screen::new(1440,900));
+        for (dest_x,dest_y,expected) in [
+            (1920,50,Side::Right),
+            (-1440,50,Side::Left),
+            (100,-900,Side::Top),
+            (100,1080,Side::Bottom)
+        ] {
+            let (li,layout)=snap_to_edge(&local,&remote,0,dest_x,dest_y);
+            assert_eq!(li,0);
+            assert_eq!(layout.side,expected,
+                "Drag to ({dest_x},{dest_y}) selected wrong side");
+            let final_layout=layout.clamp(local[li].screen(),remote[0].screen());
+            let (origin_x,origin_y)=group_origin(final_layout,&local,&remote,li,0);
+            let l=local[li];
+            let r=remote[0];
+            match expected {
+                Side::Right=>assert_eq!(origin_x+r.x,l.x+l.w),
+                Side::Left=>assert_eq!(origin_x+r.x+r.w,l.x),
+                Side::Top=>assert_eq!(origin_y+r.y+r.h,l.y),
+                Side::Bottom=>assert_eq!(origin_y+r.y,l.y+l.h),
+            }
+        }
+    }
+    #[test] fn switching_drag_from_right_to_left_is_not_stuck_on_initial_side(){
+        let local=single_display(Screen::new(1920,1080));
+        let remote=single_display(Screen::new(1440,900));
+        let (_,start)=snap_to_edge(&local,&remote,0,1920,100);
+        assert_eq!(start.side,Side::Right);
+        let (_,drop)=snap_to_edge(&local,&remote,0,-1440,100);
+        assert_eq!(drop.side,Side::Left);
+        assert_eq!(group_origin(drop,&local,&remote,0,0).0,-1440);
+    }
     #[test] fn offset_mapping(){
         let a=Screen::new(1920,1080); let b=Screen::new(1440,900);
         let l=Layout {side: Side::Right, offset:100};

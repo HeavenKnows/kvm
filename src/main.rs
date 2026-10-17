@@ -14,6 +14,8 @@ mod native_keyboard;
 mod display;
 #[cfg(target_os="macos")]
 mod macos_tray;
+#[cfg(target_os="windows")]
+mod windows_tray;
 
 use eframe::egui;
 use model::{Language, Layout, Settings, Side};
@@ -211,13 +213,7 @@ fn shortcut_mapping_group_ui(
         }else{
             tr(lang,"Mac → Windows 快捷键","Mac → Windows shortcuts")
         });
-        ui.small(if windows_to_mac{
-            tr(lang,"按下 Windows 键盘时，将左列组合键映射为右列 Mac 快捷键。",
-                "Press on Windows; the right column is sent to Mac.")
-        }else{
-            tr(lang,"按下 Mac 键盘时，将左列组合键映射为右列 Windows 快捷键。",
-                "Press on Mac; the right column is sent to Windows.")
-        });
+
         let mut changed=false;
         let mut remove=None;
         egui::ScrollArea::vertical().max_height(315.0)
@@ -271,10 +267,7 @@ fn shortcut_mapping_group_ui(
             });
             changed=true;
         }
-        if !rules.iter().any(|r|r.from_os==from_os){
-            ui.small(tr(lang,"此方向暂无规则：全部原样透传。",
-                "No mappings for this direction: all keys pass through."));
-        }
+
         changed
     }).inner
 }
@@ -289,6 +282,9 @@ struct KvmApp {
     ip_refresh_tx:mpsc::Sender<()>,
     drag_start_layout: Option<Layout>,
     drag_start_group:Option<(i32,i32)>,
+    /// The free position of the remote display while dragging.
+    drag_preview:Option<(i32,i32)>,
+    dragging_remote:Option<usize>,
     display_rx:Option<Receiver<display::Desktop>>,
     ip_rx:Option<Receiver<Vec<Ipv4Addr>>>,
     startup_at:Instant,
@@ -299,6 +295,12 @@ struct KvmApp {
     tray:Option<macos_tray::MacMenuBar>,
     #[cfg(target_os="macos")]
     tray_attempted:bool,
+    #[cfg(target_os="windows")]
+    win_tray:Option<windows_tray::WindowsTray>,
+    #[cfg(target_os="windows")]
+    win_tray_attempted:bool,
+    #[cfg(target_os="windows")]
+    win_tray_error:Option<String>,
     frames:u32,
     page:UiPage,
     #[cfg(target_os="macos")]
@@ -377,6 +379,7 @@ impl KvmApp {
             ip_snapshot_seen:false,ip_changed_notice:false,
             ip_monitor_disconnected:false,ip_refresh_tx,
             drag_start_layout:None,drag_start_group:None,
+            drag_preview:None,dragging_remote:None,
             display_rx:Some(display_rx),ip_rx:Some(ip_rx),
             startup_at:Instant::now(),display_loaded:false,display_slow:false,
             auto_start_waiting,
@@ -384,6 +387,12 @@ impl KvmApp {
             tray:None,
             #[cfg(target_os="macos")]
             tray_attempted:false,
+            #[cfg(target_os="windows")]
+            win_tray:None,
+            #[cfg(target_os="windows")]
+            win_tray_attempted:false,
+            #[cfg(target_os="windows")]
+            win_tray_error:None,
             frames:0,
             page:UiPage::Overview,
             #[cfg(target_os="macos")]
@@ -419,9 +428,7 @@ impl KvmApp {
                 });
             }
         }
-        ui.small(tr(lang,
-            "IP 每 2 秒自动检查。若有多个 IP，请使用与 Windows 处于同一局域网的地址；VPN 地址可能无法连接。",
-            "IP addresses update automatically every 2 seconds. If multiple addresses appear, use one on the same LAN as Windows; VPN addresses may not work."));
+
         if self.ip_monitor_disconnected{
             ui.colored_label(egui::Color32::YELLOW,tr(lang,
                 "IP 自动监测已停止，请重新启动 KVM。",
@@ -444,14 +451,7 @@ impl KvmApp {
         ui.label(tr(lang,
             "灰色为本机，蓝色为接收端。拖动任意蓝色显示器，靠近灰色显示器边缘时自动吸附。",
             "Grey: this computer. Blue: receiver. Drag any blue display near a grey display to snap to its edge."));
-        ui.horizontal_wrapped(|ui|{
-            ui.small(format!("{} {}  ·  {} {}",
-                tr(lang,"本机","Local"),local.len(),
-                tr(lang,"远端","Remote"),remote.len()));
-            ui.small(tr(lang,
-                "数字代表显示器顺序；跨屏点只在吸附的边缘生效",
-                "Numbers identify monitors; switching occurs at the snapped edge"));
-        });
+
         let (area,_)=ui.allocate_exact_size(
             egui::vec2(ui.available_width().min(730.0),365.0),egui::Sense::hover());
         // CRITICAL: take each screen snapshot once, then DROP the MutexGuard
@@ -480,7 +480,7 @@ impl KvmApp {
         for (i,d) in local.iter().enumerate(){
             let r=to_rect(*d,0,0);
             let selected=i==self.settings.local_display;
-            painter.rect_filled(r,4.0,if selected {
+            painter.rect_filled(r,4.0,if selected{
                 egui::Color32::from_rgb(108,128,158)
             }else{egui::Color32::from_rgb(76,91,113)});
             painter.rect_stroke(r,4.0,
@@ -490,9 +490,19 @@ impl KvmApp {
                 format!("{} {}",tr(lang,"本机","Local"),i+1),
                 egui::FontId::proportional(12.0),egui::Color32::WHITE);
         }
+        // Snapshot placement only once on pointer-down, move the remote
+        // display freely while held, and snap the touching edges on release.
+        // Updating layout during drag made the screen teleport to an adjacent
+        // edge each frame, preventing crossing from right to left.
         for (i,d) in remote.iter().enumerate(){
-            let r=to_rect(*d,gx,gy);
-            let selected=i==self.settings.remote_display;
+            let original_x=d.x+gx;
+            let original_y=d.y+gy;
+            let (x,y)=if self.dragging_remote==Some(i){
+                self.drag_preview.unwrap_or((original_x,original_y))
+            }else{(original_x,original_y)};
+            let r=to_rect(*d,x-d.x,y-d.y);
+            let selected=i==self.settings.remote_display||
+                self.dragging_remote==Some(i);
             painter.rect_filled(r,4.0,if selected{
                 egui::Color32::from_rgb(33,128,225)
             }else{egui::Color32::from_rgb(36,100,178)});
@@ -505,46 +515,35 @@ impl KvmApp {
             let drag=ui.interact(r,ui.id().with(("remote-monitor",i)),egui::Sense::drag());
             if drag.drag_started(){
                 self.drag_start_layout=Some(self.settings.layout);
-                self.drag_start_group=Some((gx,gy));
+                self.drag_start_group=Some((original_x,original_y));
+                self.drag_preview=Some((original_x,original_y));
+                self.dragging_remote=Some(i);
             }
-            if drag.dragged(){
-                // Every gesture is relative to its ORIGINAL position, not to
-                // the continuously snapped preview (avoids cumulative jumps).
-                let (sx,sy)=self.drag_start_group.unwrap_or((gx,gy));
+            if drag.dragged() && self.dragging_remote==Some(i){
+                let (sx,sy)=self.drag_start_group.unwrap_or((original_x,original_y));
                 let delta=drag.drag_delta()/scale;
-                let dest_x=d.x+sx+delta.x.round() as i32;
-                let dest_y=d.y+sy+delta.y.round() as i32;
-                let (li,layout)=snap_to_edge(&local,&remote,i,dest_x,dest_y);
+                self.drag_preview=Some((
+                    sx.saturating_add(delta.x.round() as i32),
+                    sy.saturating_add(delta.y.round() as i32)
+                ));
+            }
+            if drag.drag_stopped() && self.dragging_remote==Some(i){
+                let (px,py)=self.drag_preview.unwrap_or((original_x,original_y));
+                let (li,layout)=snap_to_edge(&local,&remote,i,px,py);
+                // A snapped Layout always draws shared edges flush:
+                // Right uses l.x+l.w, Left uses l.x-r.w, etc.
                 self.settings.local_display=li;
                 self.settings.remote_display=i;
                 self.settings.layout=layout.clamp(local[li].screen(),d.screen());
                 *self.state.layout.lock().unwrap()=self.settings.layout;
                 self.state.set_layout_targets(li,i);
-            }
-            if drag.drag_stopped(){
+                self.dragging_remote=None;
+                self.drag_preview=None;
                 self.drag_start_layout=None;
                 self.drag_start_group=None;
                 self.persist_settings();
             }
         }
-        ui.horizontal_wrapped(|ui|{
-            ui.label(tr(lang,"吸附方向","Snap direction"));
-            for (side,label_zh,label_en) in [
-                (Side::Left,"左","Left"),(Side::Right,"右","Right"),
-                (Side::Top,"上","Top"),(Side::Bottom,"下","Bottom")
-            ]{
-                if ui.selectable_label(self.settings.layout.side==side,
-                        tr(lang,label_zh,label_en)).clicked(){
-                    self.settings.layout.side=side;
-                    self.settings.layout=self.settings.layout.clamp(
-                        local[self.settings.local_display].screen(),
-                        remote[self.settings.remote_display].screen());
-                    *self.state.layout.lock().unwrap()=self.settings.layout;
-                    self.state.set_layout_targets(self.settings.local_display,self.settings.remote_display);
-                    self.persist_settings();
-                }
-            }
-        });
         let ld=local[self.settings.local_display];
         let rd=remote[self.settings.remote_display];
         let bounds=if matches!(self.settings.layout.side,Side::Left|Side::Right){
@@ -569,14 +568,8 @@ impl KvmApp {
             *self.state.layout.lock().unwrap()=self.settings.layout;
             self.persist_settings();
         }
-        ui.small(format!("{} {} {} ↔ {} {} · {}",
-            tr(lang,"本机","Local"),self.settings.local_display+1,
-            tr(lang,"显示器","monitor"),
-            tr(lang,"远端","Remote"),self.settings.remote_display+1,
-            side_name(self.settings.layout.side,lang)));
-        ui.small(tr(lang,
-            "插拔显示器后请重启两端，重新连接会同步远端最新的显示器拓扑。",
-            "After plugging/unplugging displays, restart both apps; reconnect to refresh remote topology."));
+
+
     }
 
 
@@ -601,11 +594,7 @@ impl KvmApp {
                 ui.colored_label(egui::Color32::from_rgb(72,192,139),
                     tr(lang,"正在控制另一台电脑 · F12 返回本机","Controlling remote computer · F12 to return"));
             }
-            if started && !connected && !self.settings.role_server{
-                ui.small(tr(lang,
-                    "TCP 连接、配对和接收端响应均设置了超时。",
-                    "TCP, pairing and receiver responses have timeouts."));
-            }
+
         });
         ui.add_space(12.0);
         section_card(ui,tr(lang,"设备与连接","Devices & connection"),|ui|{
@@ -639,11 +628,7 @@ impl KvmApp {
                         tr(lang,
                             "接收服务尚未监听。请点击下方「启动接收端」，否则 Windows 会被拒绝连接。",
                             "Receiver is not listening. Click Start receiver below or Windows connections will be refused."));
-                }else if !connected{
-                    ui.small(tr(lang,
-                        "接收端已启动；状态应显示等待连接。如出现端口占用错误，请先退出其他旧版 kvm。",
-                        "Receiver started. Status should read Waiting. If the port is in use, quit other older kvm instances."));
-                }
+
                 #[cfg(target_os="macos")]
                 if !native_cursor::accessibility_trusted(){
                     ui.colored_label(egui::Color32::YELLOW,tr(lang,
@@ -701,8 +686,7 @@ impl KvmApp {
                 tr(lang,"连接后在「屏幕布局」中调整显示器位置，将鼠标移到相应屏幕边缘切换。",
                     "After connecting, arrange displays on the Displays page and move the pointer across the shared edge.")
             });
-            ui.small(tr(lang,"仅限可信局域网 · 按 F12 可紧急返回",
-                "Trusted LAN only · F12 is the emergency return shortcut"));
+
         });
     }
 
@@ -718,9 +702,7 @@ impl KvmApp {
                     });
                 }
                 ui.add_space(5.0);
-                ui.small(tr(lang,
-                    "请在 Windows 控制端拖动屏幕并自动吸附到对应边缘。",
-                    "Drag and snap the displays on the Windows controller."));
+
             });
         }else{
             section_card(ui,tr(lang,"拖拽与自动吸附","Drag & snap"),|ui|{
@@ -751,9 +733,7 @@ impl KvmApp {
         });
         ui.add_space(12.0);
         section_card(ui,tr(lang,"快捷键映射（显式配置）","Shortcut mappings (explicit)"),|ui|{
-            ui.small(tr(lang,
-                "以下两张表是全部映射来源，保存到 settings.json。没有命中的组合键、同系统连接都原样透传；不存在隐藏默认层。F12 始终保留为紧急返回键。",
-                "Both lists below are the entire mapping configuration, persisted to settings.json. Unmatched chords and same-OS sessions pass through unchanged; there is no hidden default layer. F12 always returns control."));
+
             let mut changed=false;
             changed|=shortcut_mapping_group_ui(ui,&mut self.settings.shortcut_mappings,
                 model::Platform::Windows,lang);
@@ -770,10 +750,10 @@ impl KvmApp {
                 self.persist_settings();
             }
             let table=input::ShortcutTable::compile(&self.settings.shortcut_mappings);
-            ui.small(format!("{}: {} · {}: {}",
-                tr(lang,"当前有效映射","Active mappings"),table.len(),
-                tr(lang,"无效或重复规则（已跳过）","Invalid or duplicate (skipped)"),
-                table.errors()));
+            if table.errors()>0{
+                ui.colored_label(egui::Color32::from_rgb(240,125,110),
+                    format!("{}: {}",tr(lang,"无效或重复映射","Invalid or duplicate shortcuts"),table.errors()));
+            }
         });
         ui.add_space(12.0);
         if self.settings.role_server{
@@ -804,13 +784,8 @@ impl KvmApp {
                         self.persist_settings();
                     }
                 });
-                if self.state.started.load(Ordering::SeqCst){
-                    ui.small(tr(lang,
-                        "正在监听时不能更换密钥；先停止接收，修改后重新启动，避免界面密钥与实际网络密钥不一致。",
-                        "The pairing key is locked while listening. Stop receiver first, then change the key and restart to keep the displayed key in sync."));
-                }
-                ui.small(tr(lang,"端口和密钥变更后，需要重启接收端并更新控制端配置。",
-                    "After changing the port or key, restart the receiver and update the controller."));
+
+
             });
             section_card(ui,tr(lang,"鼠标侧键","Extra mouse buttons"),|ui|{
                 let was=self.settings.side_buttons_native;
@@ -822,9 +797,7 @@ impl KvmApp {
                         self.settings.side_buttons_native,Ordering::SeqCst);
                     self.persist_settings();
                 }
-                ui.small(tr(lang,
-                    "默认使用 ⌘[ / ⌘] 进行后退/前进；原生模式供支持扩展按键的应用使用。鼠标厂商软件的自定义宏不会自动跨系统复制。",
-                    "Default: Command+[ / Command+] for Back/Forward. Native mode sends buttons 4/5 to supporting apps. Vendor-specific macros are not automatically transferred."));
+
             });
         }else{
             section_card(ui,tr(lang,"鼠标体验","Mouse & pointer"),|ui|{
@@ -834,9 +807,7 @@ impl KvmApp {
                     self.state.set_mouse_speed(self.settings.mouse_speed);
                     self.persist_settings();
                 }
-                ui.small(tr(lang,
-                    "Raw Input 不包含 Windows 系统鼠标加速，连接中也可调整。",
-                    "Raw Input bypasses Windows acceleration; this updates live."));
+
                 ui.add_space(8.0);
                 ui.label(tr(lang,"远端滚轮速度（像素级，1× ≈ 4 px/格）",
                     "Remote wheel speed (pixel-level, 1x ≈ 4 px/notch)"));
@@ -845,9 +816,7 @@ impl KvmApp {
                     self.state.set_scroll_speed(self.settings.scroll_speed);
                     self.persist_settings();
                 }
-                ui.small(tr(lang,
-                    "设置实时生效。0.1× 可极慢滚动；小于 1 像素的滚轮增量会累计，支持纵向和横向滚动。",
-                    "Applies immediately. Use 0.1x for very slow scrolling; subpixel wheel deltas accumulate. Supports vertical and horizontal scrolling."));
+
             });
         }
     }
@@ -858,6 +827,11 @@ impl KvmApp {
             let connected=self.state.ready.load(Ordering::SeqCst);
             let status=self.state.status.lock().unwrap().clone();
             ui.label(format!("{}: {}",tr(lang,"状态","Status"),status.text(lang)));
+            #[cfg(target_os="windows")]
+            if let Some(error)=&self.win_tray_error{
+                ui.colored_label(egui::Color32::from_rgb(240,125,110),
+                    format!("{}: {error}",tr(lang,"Windows 托盘不可用","Windows tray unavailable")));
+            }
             ui.label(format!("{}: {}",tr(lang,"网络往返延迟","Network RTT"),
                 if rtt==u64::MAX{"—".to_string()}else{format!("{rtt} ms")}));
             ui.label(format!("{}: {} ms",tr(lang,"本次连接 RTT 峰值","Session RTT peak"),
@@ -883,8 +857,7 @@ impl KvmApp {
             ui.label(format!("{}: {}",tr(lang,"注入失败次数","Injection failures"),
                 self.state.mouse_injection_failures.load(Ordering::Relaxed)));
             if !connected {
-                ui.small(tr(lang,"未连接时 RTT 不显示；日志仅保留最近事件。",
-                    "RTT is shown only when connected; recent events remain available."));
+    
             }
             if ui.button(tr(lang,"复制完整诊断","Copy full diagnostics")).clicked(){
                 let diagnostic=format!(
@@ -1036,6 +1009,32 @@ impl eframe::App for KvmApp {
             launch_mark("receiver-auto-start");
             engine::start_server(self.state.clone(),self.settings.clone());
         }
+        #[cfg(target_os="windows")]
+        {
+            // The Windows tray must be created on the GUI/message-loop thread.
+            // Never hide the window if creating the tray failed.
+            if !self.win_tray_attempted && self.frames>=2 {
+                self.win_tray_attempted=true;
+                match windows_tray::WindowsTray::new(ctx,self.settings.language){
+                    Ok(tray)=>self.win_tray=Some(tray),
+                    Err(error)=>self.win_tray_error=Some(error),
+                }
+            }
+            if let Some(tray)=&mut self.win_tray {
+                tray.set_language(self.settings.language);
+                // Process Open before Close, and never intercept explicit Quit.
+                if tray.take_open_request(){
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                if ctx.input(|i|i.viewport().close_requested())
+                    && windows_tray::should_hide_close(true,tray.quitting()){
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                }
+            }
+        }
         #[cfg(target_os="macos")]
         {
             // Status icon must be created after the native event loop starts,
@@ -1100,7 +1099,7 @@ impl eframe::App for KvmApp {
                 ui.add_space(18.0);
                 ui.heading(egui::RichText::new("kvm").size(30.0).strong());
                 ui.small(format!("v{}",env!("CARGO_PKG_VERSION")));
-                ui.small(tr(lang,"跨设备键鼠共享","Cross-device KVM"));
+
                 ui.add_space(22.0);
                 for page in [UiPage::Overview,UiPage::Displays,UiPage::Preferences,UiPage::Diagnostics]{
                     let label=page.label(lang);
