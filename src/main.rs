@@ -70,6 +70,24 @@ fn load_system_cjk_font()->Option<(&'static str,Vec<u8>)>{
     })
 }
 
+/// Update the cached receiver addresses without mistaking the initial
+/// network scan for a Wi-Fi change. Empty results must clear stale addresses,
+/// and repeated identical scans must not show a false reconnect warning.
+fn apply_ip_snapshot(
+    current:&mut Vec<Ipv4Addr>,
+    snapshot_seen:&mut bool,
+    changed_notice:&mut bool,
+    mut next:Vec<Ipv4Addr>
+)->bool{
+    next.sort_unstable();
+    next.dedup();
+    let changed=*current!=next;
+    if *snapshot_seen && changed {*changed_notice=true;}
+    *snapshot_seen=true;
+    if changed {*current=next;}
+    changed
+}
+
 fn tr(lang: Language, zh: &'static str, en: &'static str) -> &'static str {
     if lang == Language::Zh { zh } else { en }
 }
@@ -178,6 +196,10 @@ struct KvmApp {
     settings: Settings,
     state: Arc<engine::Shared>,
     ips: Vec<Ipv4Addr>,
+    ip_snapshot_seen:bool,
+    ip_changed_notice:bool,
+    ip_monitor_disconnected:bool,
+    ip_refresh_tx:mpsc::Sender<()>,
     drag_start_layout: Option<Layout>,
     drag_start_group:Option<(i32,i32)>,
     display_rx:Option<Receiver<display::Desktop>>,
@@ -220,12 +242,28 @@ impl KvmApp {
             launch_mark("display-query-done");
             let _=display_tx.send(d);
         });
+        // A single background worker tracks network interface changes for
+        // the ENTIRE app lifetime. Wi-Fi rejoin/DHCP lease changes invalidate
+        // the address shown on the Mac receiver, not just at startup.
+        // Never call get_if_addrs() from an egui event callback.
         let (ip_tx,ip_rx)=mpsc::channel();
+        let (ip_refresh_tx,ip_refresh_rx)=mpsc::channel::<()>();
         std::thread::spawn(move ||{
-            launch_mark("network-scan-start");
-            let ips=network::local_ipv4_addresses();
-            launch_mark("network-scan-done");
-            let _=ip_tx.send(ips);
+            launch_mark("network-monitor-start");
+            let mut previous:Option<Vec<Ipv4Addr>>=None;
+            loop {
+                let addresses=network::local_ipv4_addresses();
+                if previous.as_ref()!=Some(&addresses){
+                    if ip_tx.send(addresses.clone()).is_err(){break;}
+                    if previous.is_some(){launch_mark("network-ip-change-detected");}
+                    previous=Some(addresses);
+                }
+                match ip_refresh_rx.recv_timeout(Duration::from_secs(2)){
+                    Ok(())|Err(mpsc::RecvTimeoutError::Timeout)=>{},
+                    Err(mpsc::RecvTimeoutError::Disconnected)=>break,
+                }
+            }
+            launch_mark("network-monitor-stop");
         });
         let auto_start_waiting=settings.role_server && settings.auto_start_receiver;
         #[cfg(target_os="macos")]
@@ -241,6 +279,8 @@ impl KvmApp {
         };
         Self{
             settings,state,ips:Vec::new(),
+            ip_snapshot_seen:false,ip_changed_notice:false,
+            ip_monitor_disconnected:false,ip_refresh_tx,
             drag_start_layout:None,drag_start_group:None,
             display_rx:Some(display_rx),ip_rx:Some(ip_rx),
             startup_at:Instant::now(),display_loaded:false,display_slow:false,
@@ -264,8 +304,8 @@ impl KvmApp {
     fn receiver_addresses(&mut self, ui: &mut egui::Ui, lang: Language) {
         ui.horizontal(|ui| {
             ui.strong(tr(lang, "本机地址（控制端填写以下任一地址）", "Local addresses (enter one on the controller)"));
-            if ui.button(tr(lang, "刷新 IP", "Refresh IPs")).clicked() {
-                self.ips = network::local_ipv4_addresses();
+            if ui.button(tr(lang, "立即检查", "Check now")).clicked() {
+                let _=self.ip_refresh_tx.send(());
             }
         });
         if self.ips.is_empty() {
@@ -283,8 +323,13 @@ impl KvmApp {
             }
         }
         ui.small(tr(lang,
-            "若存在多个 IP，优先使用与控制端处于同一局域网的地址；VPN 地址可能无法连接。",
-            "If multiple addresses appear, use one on the same LAN as the controller; VPN addresses may not work."));
+            "IP 每 2 秒自动检查。若有多个 IP，请使用与 Windows 处于同一局域网的地址；VPN 地址可能无法连接。",
+            "IP addresses update automatically every 2 seconds. If multiple addresses appear, use one on the same LAN as Windows; VPN addresses may not work."));
+        if self.ip_monitor_disconnected{
+            ui.colored_label(egui::Color32::YELLOW,tr(lang,
+                "IP 自动监测已停止，请重新启动 KVM。",
+                "IP address monitoring has stopped; restart KVM."));
+        }
     }
 
     /// Every physical display is drawn as a separate numbered monitor.
@@ -763,12 +808,31 @@ impl eframe::App for KvmApp {
             }
         }
         }
-        if let Some(rx)=&self.ip_rx{
-            match rx.try_recv(){
-                Ok(addresses)=>{self.ips=addresses;self.ip_rx=None;}
-                Err(TryRecvError::Empty)=>{}
-                Err(TryRecvError::Disconnected)=>{self.ip_rx=None;}
+        let mut newest_addresses=None;
+        let mut monitor_closed=false;
+        if let Some(rx)=&self.ip_rx {
+            // Drain snapshots if Wi-Fi rapidly disconnects and rejoins;
+            // the latest observed interface state is what the UI must show.
+            loop {
+                match rx.try_recv(){
+                    Ok(addresses)=>{newest_addresses=Some(addresses);}
+                    Err(TryRecvError::Empty)=>break,
+                    Err(TryRecvError::Disconnected)=>{
+                        monitor_closed=true;
+                        break;
+                    }
+                }
             }
+        }
+        if let Some(addresses)=newest_addresses {
+            if apply_ip_snapshot(&mut self.ips,&mut self.ip_snapshot_seen,
+                &mut self.ip_changed_notice,addresses){
+                ctx.request_repaint();
+            }
+        }
+        if monitor_closed {
+            self.ip_rx=None;
+            self.ip_monitor_disconnected=true;
         }
         // Never hold the app event loop hostage if an OS monitor API blocks.
         if !self.display_loaded && self.startup_at.elapsed()>Duration::from_secs(2){
@@ -879,6 +943,20 @@ impl eframe::App for KvmApp {
                         ui.colored_label(egui::Color32::YELLOW,tr(lang,
                             "外接屏幕检测较慢，暂时使用单屏回退；重启后可刷新布局。",
                             "Monitor scan is slow; using temporary single-screen fallback."));
+                        ui.add_space(12.0);
+                    }
+                    if self.settings.role_server && self.ip_changed_notice {
+                        egui::Frame::group(ui.style())
+                            .fill(ui.visuals().extreme_bg_color)
+                            .show(ui,|ui|{
+                                ui.colored_label(egui::Color32::YELLOW,
+                                    tr(lang,
+                                        "检测到 Mac 网络地址变化。Windows 中保存的旧 IP 可能失效，请在「概览」复制最新 IP:端口并重新连接。",
+                                        "This Mac's IP address changed. The old address saved on Windows may no longer work. Copy the current IP:port from Overview and reconnect."));
+                                if ui.button(tr(lang,"知道了","Dismiss")).clicked(){
+                                    self.ip_changed_notice=false;
+                                }
+                            });
                         ui.add_space(12.0);
                     }
                     match self.page{
@@ -994,5 +1072,44 @@ mod page_navigation_tests {
         });
         assert!(rx.recv_timeout(Duration::from_secs(8)).is_ok(),
             "one of the four UI pages did not finish rendering");
+    }
+}
+
+/// LAN address monitoring tests: fresh DHCP leases must replace cached IPs.
+#[cfg(test)]
+mod receiver_network_refresh_tests{
+    use super::*;
+    #[test]
+    fn wifi_rejoin_updates_and_does_not_keep_old_address(){
+        let first=Ipv4Addr::new(192,168,20,148);
+        let next=Ipv4Addr::new(192,168,20,163);
+        let mut ips=Vec::new();
+        let mut seen=false;
+        let mut notice=false;
+        assert!(apply_ip_snapshot(&mut ips,&mut seen,&mut notice,vec![first]));
+        assert_eq!(ips,vec![first]);
+        assert!(!notice,"initial scan must not be called a network change");
+        assert!(!apply_ip_snapshot(&mut ips,&mut seen,&mut notice,vec![first]));
+        assert!(!notice,"unchanged Wi-Fi address should not trigger warning");
+        assert!(apply_ip_snapshot(&mut ips,&mut seen,&mut notice,Vec::new()));
+        assert!(ips.is_empty(),"disconnected Wi-Fi must clear stale IP");
+        assert!(notice,"a change after initial scan needs a reconnect warning");
+        notice=false;
+        assert!(apply_ip_snapshot(&mut ips,&mut seen,&mut notice,vec![next]));
+        assert_eq!(ips,vec![next]);
+        assert!(notice);
+        assert!(!ips.contains(&first));
+    }
+    #[test]
+    fn duplicate_and_reordered_ips_are_stable(){
+        let one=Ipv4Addr::new(10,0,0,4);
+        let two=Ipv4Addr::new(192,168,20,151);
+        let mut ips=Vec::new();
+        let mut seen=false;
+        let mut notice=false;
+        assert!(apply_ip_snapshot(&mut ips,&mut seen,&mut notice,vec![two,one,one]));
+        assert_eq!(ips,vec![one,two]);
+        assert!(!apply_ip_snapshot(&mut ips,&mut seen,&mut notice,vec![one,two]));
+        assert!(!notice);
     }
 }
