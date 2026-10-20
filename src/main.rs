@@ -119,12 +119,14 @@ fn side_name(side: Side, lang: Language) -> &'static str {
     }
 }
 
-/// Valid Noise-PSK material must be 32 hexadecimal characters. Return
-/// whether a new key was generated so the caller can persist it immediately.
+/// User-edited keys preserve protocol compatibility with deployed peers.
+fn valid_pairing_secret(secret:&str)->bool{
+    secret.len()==32 && secret.bytes().all(|b|b.is_ascii_hexdigit())
+}
+/// Generate ONLY when there is no saved key; an incomplete user edit should
+/// never be silently replaced on restart (and must not start a connection).
 fn ensure_pairing_secret(settings:&mut Settings)->bool{
-    if settings.secret.len()==32 && settings.secret.bytes().all(|b|b.is_ascii_hexdigit()){
-        return false;
-    }
+    if !settings.secret.is_empty(){return false;}
     settings.secret=generate_secret();
     true
 }
@@ -318,6 +320,8 @@ struct KvmApp {
     display_rx:Option<Receiver<display::Desktop>>,
     display_feedback:Option<String>,
     update_dir_error:Option<String>,
+    pairing_key_draft:String,
+    pairing_key_error:Option<String>,
     ip_rx:Option<Receiver<Vec<Ipv4Addr>>>,
     startup_at:Instant,
     display_loaded:bool,
@@ -380,6 +384,7 @@ impl KvmApp {
         // Nonblocking initialization: do not call the OS display enumeration
         // or interface scanner from the eframe app-creation callback.
         launch_mark("shared-start");
+        let pairing_key_draft=settings.secret.clone();
         let state=engine::Shared::new(&settings);
         launch_mark("shared-ready");
         let (display_tx,display_rx)=mpsc::channel();
@@ -443,7 +448,8 @@ impl KvmApp {
             drag_start_pointer:None,
             drag_preview:None,dragging_remote:None,
             display_rx:Some(display_rx),display_feedback:None,
-            update_dir_error:None,ip_rx:Some(ip_rx),
+            update_dir_error:None,pairing_key_draft,pairing_key_error:None,
+            ip_rx:Some(ip_rx),
             startup_at:Instant::now(),display_loaded:false,display_slow:false,
             auto_start_waiting,
             #[cfg(target_os="macos")]
@@ -493,6 +499,19 @@ impl KvmApp {
         }
     }
     fn persist_settings(&self) { model::save(&self.settings); }
+    fn save_pairing_key(&mut self)->Result<(),String>{
+        let candidate=self.pairing_key_draft.trim();
+        if !valid_pairing_secret(candidate){
+            return Err("配对密钥必须是 32 位十六进制字符（0-9、a-f），建议使用随机密钥。 / Use exactly 32 hexadecimal characters.".into());
+        }
+        if self.state.started.load(Ordering::SeqCst){
+            return Err("运行中不能修改密钥，请先停止服务或断开连接。 / Stop the session before changing the key.".into());
+        }
+        self.settings.secret=candidate.to_ascii_lowercase();
+        self.pairing_key_draft=self.settings.secret.clone();
+        self.persist_settings();
+        Ok(())
+    }
     fn refresh_displays(&mut self,ctx:&egui::Context){
         if self.display_rx.is_some(){return;}
         if self.state.ready.load(Ordering::SeqCst){
@@ -832,14 +851,19 @@ impl KvmApp {
                 });
                 ui.horizontal_wrapped(|ui|{
                     ui.label(tr(lang,"配对密钥","Pairing key"));
-                    if ui.add(egui::TextEdit::singleline(&mut self.settings.secret)
+                    if ui.add_enabled(!started,egui::TextEdit::singleline(&mut self.settings.secret)
                         .password(true).desired_width(260.0)).changed(){
+                        self.pairing_key_draft=self.settings.secret.clone();
                         self.persist_settings();
                     }
                 });
             }
+            if !valid_pairing_secret(&self.settings.secret){
+                ui.colored_label(egui::Color32::from_rgb(240,125,110),
+                    tr(lang,"密钥无效：需填写 32 位十六进制字符。","Invalid key: enter exactly 32 hexadecimal characters."));
+            }
             ui.add_space(9.0);
-            if ui.add_enabled(!started,egui::Button::new(
+            if ui.add_enabled(!started && valid_pairing_secret(&self.settings.secret),egui::Button::new(
                 if self.settings.role_server {
                     tr(lang,"启动接收端","Start receiver")
                 }else{tr(lang,"连接并开始共享","Connect & share")}
@@ -1072,14 +1096,35 @@ impl KvmApp {
                         }
                     });
                 });
+                ui.label(tr(lang,"自定义配对密钥（32 位十六进制）",
+                    "Custom pairing key (32 hexadecimal characters)"));
                 ui.horizontal_wrapped(|ui|{
-                    ui.label(tr(lang,"配对密钥","Pairing key"));
-                    if ui.add_enabled(!self.state.started.load(Ordering::SeqCst),
-                        egui::Button::new(tr(lang,"重新生成密钥","Regenerate pairing key"))).clicked(){
+                    let can_edit=!self.state.started.load(Ordering::SeqCst);
+                    ui.add_enabled(can_edit,egui::TextEdit::singleline(&mut self.pairing_key_draft)
+                        .password(true).desired_width(300.0));
+                    if ui.add_enabled(can_edit && valid_pairing_secret(self.pairing_key_draft.trim()),
+                        egui::Button::new(tr(lang,"保存密钥","Save key"))).clicked(){
+                        self.pairing_key_error=self.save_pairing_key().err();
+                    }
+                    if ui.add_enabled(can_edit,
+                        egui::Button::new(tr(lang,"重新生成随机密钥","Generate random key"))).clicked(){
                         self.settings.secret=generate_secret();
+                        self.pairing_key_draft=self.settings.secret.clone();
+                        self.pairing_key_error=None;
                         self.persist_settings();
                     }
                 });
+                if !valid_pairing_secret(self.pairing_key_draft.trim()){
+                    ui.colored_label(egui::Color32::from_rgb(240,125,110),
+                        tr(lang,"请输入恰好 32 个十六进制字符（0–9 / a–f）。",
+                            "Enter exactly 32 hexadecimal characters (0–9 / a–f)."));
+                }
+                if let Some(err)=&self.pairing_key_error{
+                    ui.colored_label(egui::Color32::from_rgb(240,125,110),err);
+                }
+                ui.small(tr(lang,
+                    "必须与控制端一致。自定义易猜的密钥会降低安全性；建议随机生成后复制。",
+                    "Must match the controller. Weak custom keys reduce security; random is recommended."));
 
 
             });
@@ -1670,8 +1715,13 @@ mod ui_deadlock_tests {
         assert!(!ensure_pairing_secret(&mut s));
         assert_eq!(s.secret,initial);
         s.secret="not-a-hex-key".into();
-        assert!(ensure_pairing_secret(&mut s));
-        assert_eq!(s.secret.len(),32);
+        assert!(!ensure_pairing_secret(&mut s));
+        assert_eq!(s.secret,"not-a-hex-key");
+        assert!(!valid_pairing_secret(&s.secret));
+        assert!(valid_pairing_secret("abcdef0123456789abcdef0123456789"));
+        assert!(valid_pairing_secret("ABCDEF0123456789ABCDEF0123456789"));
+        assert!(!valid_pairing_secret("abcdef0123456789"));
+        assert!(!valid_pairing_secret("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
     }
     #[test]
     fn controller_layout_first_full_frame_completes() {
