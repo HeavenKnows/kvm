@@ -18,6 +18,8 @@ mod macos_tray;
 mod macos_update;
 #[cfg(target_os="windows")]
 mod windows_tray;
+#[cfg(target_os="windows")]
+mod windows_update;
 
 use eframe::egui;
 use model::{Language, Layout, Settings, Side};
@@ -340,6 +342,18 @@ struct KvmApp {
     win_tray_attempted:bool,
     #[cfg(target_os="windows")]
     win_tray_error:Option<String>,
+    #[cfg(target_os="windows")]
+    win_update_check_rx:Option<Receiver<Result<Option<windows_update::Release>,String>>>,
+    #[cfg(target_os="windows")]
+    win_update_download_rx:Option<Receiver<Result<std::path::PathBuf,String>>>,
+    #[cfg(target_os="windows")]
+    win_update_latest:Option<windows_update::Release>,
+    #[cfg(target_os="windows")]
+    win_update_error:Option<String>,
+    #[cfg(target_os="windows")]
+    win_update_message:Option<String>,
+    #[cfg(target_os="windows")]
+    win_auto_check_started:bool,
     frames:u32,
     page:UiPage,
     #[cfg(target_os="macos")]
@@ -450,6 +464,18 @@ impl KvmApp {
             win_tray_attempted:false,
             #[cfg(target_os="windows")]
             win_tray_error:None,
+            #[cfg(target_os="windows")]
+            win_update_check_rx:None,
+            #[cfg(target_os="windows")]
+            win_update_download_rx:None,
+            #[cfg(target_os="windows")]
+            win_update_latest:None,
+            #[cfg(target_os="windows")]
+            win_update_error:None,
+            #[cfg(target_os="windows")]
+            win_update_message:windows_update::take_status(),
+            #[cfg(target_os="windows")]
+            win_auto_check_started:false,
             frames:0,
             page:UiPage::Overview,
             #[cfg(target_os="macos")]
@@ -477,6 +503,56 @@ impl KvmApp {
         std::thread::spawn(move||{
             let _=tx.send(macos_update::check_latest());
             ctx.request_repaint();
+        });
+    }
+
+    #[cfg(target_os="windows")]
+    fn check_windows_updates(&mut self,ctx:&egui::Context){
+        if self.win_update_check_rx.is_some() || self.win_update_download_rx.is_some(){return;}
+        self.win_update_latest=None;
+        self.win_update_error=None;
+        self.win_update_message=Some("正在检查更新… / Checking updates…".into());
+        let (tx,rx)=mpsc::channel();
+        self.win_update_check_rx=Some(rx);
+        let ctx=ctx.clone();
+        std::thread::spawn(move||{
+            let _=tx.send(windows_update::check_latest());
+            ctx.request_repaint();
+        });
+    }
+    #[cfg(target_os="windows")]
+    fn ui_windows_updates(&mut self,ui:&mut egui::Ui,lang:Language){
+        ui.add_space(12.0);
+        section_card(ui,tr(lang,"更新","Updates"),|ui|{
+            let busy=self.win_update_check_rx.is_some() ||
+                self.win_update_download_rx.is_some();
+            ui.horizontal_wrapped(|ui|{
+                if ui.add_enabled(!busy,egui::Button::new(
+                    tr(lang,"检查更新","Check for updates"))).clicked(){
+                    self.check_windows_updates(ui.ctx());
+                }
+                if let Some(release)=self.win_update_latest.clone(){
+                    if ui.add_enabled(!busy,egui::Button::new(format!(
+                        "{} v{}",tr(lang,"下载并安装","Download & install"),release.version))).clicked(){
+                        let (tx,rx)=mpsc::channel();
+                        self.win_update_download_rx=Some(rx);
+                        self.win_update_error=None;
+                        self.win_update_message=Some(tr(lang,
+                            "正在下载并校验新版…","Downloading and verifying update…").into());
+                        let ctx=ui.ctx().clone();
+                        std::thread::spawn(move||{
+                            let _=tx.send(windows_update::download_release(&release));
+                            ctx.request_repaint();
+                        });
+                    }
+                }
+            });
+            if let Some(message)=&self.win_update_message{
+                ui.label(message);
+            }
+            if let Some(error)=&self.win_update_error{
+                ui.colored_label(egui::Color32::from_rgb(240,125,110),error);
+            }
         });
     }
 
@@ -823,6 +899,8 @@ impl KvmApp {
                 }
             });
         }
+        #[cfg(target_os="windows")]
+        self.ui_windows_updates(ui,lang);
         ui.add_space(12.0);
     }
 
@@ -866,13 +944,15 @@ impl KvmApp {
                 self.state.clipboard.store(self.settings.clipboard,Ordering::SeqCst);
                 self.persist_settings();
             }
-            #[cfg(target_os="macos")]
             if ui.checkbox(&mut self.settings.auto_check_updates,
                 tr(lang,"启动时自动检查更新（安装前需确认）",
                    "Automatically check updates on launch (install requires approval)")).changed(){
                 self.persist_settings();
                 if self.settings.auto_check_updates{
+                    #[cfg(target_os="macos")]
                     self.check_online_updates(ui.ctx());
+                    #[cfg(target_os="windows")]
+                    self.check_windows_updates(ui.ctx());
                 }
             }
         });
@@ -1225,6 +1305,80 @@ impl eframe::App for KvmApp {
         }
         #[cfg(target_os="windows")]
         {
+            // Check at startup, just like macOS; never silently install.
+            if !self.win_auto_check_started && self.frames>=5{
+                self.win_auto_check_started=true;
+                if self.settings.auto_check_updates{self.check_windows_updates(ctx);}
+            }
+            // Background networking and SHA-256 hashing must never block egui.
+            if let Some(rx)=&self.win_update_check_rx{
+                match rx.try_recv(){
+                    Ok(result)=>{
+                        self.win_update_check_rx=None;
+                        match result{
+                            Ok(Some(release))=>{
+                                self.win_update_message=Some(format!(
+                                    "{} v{}",tr(self.settings.language,
+                                        "发现新版本","New version available"),release.version));
+                                self.win_update_latest=Some(release);
+                                self.win_update_error=None;
+                            },
+                            Ok(None)=>{
+                                self.win_update_latest=None;
+                                self.win_update_message=Some(tr(self.settings.language,
+                                    "已经是最新版本","Already up to date").into());
+                            },
+                            Err(e)=>{
+                                self.win_update_message=None;
+                                self.win_update_error=Some(e);
+                            },
+                        }
+                    },
+                    Err(TryRecvError::Disconnected)=>{
+                        self.win_update_check_rx=None;
+                        self.win_update_message=None;
+                        self.win_update_error=Some("更新检查线程意外退出".into());
+                    },
+                    Err(TryRecvError::Empty)=>{},
+                }
+            }
+            if let Some(rx)=&self.win_update_download_rx{
+                match rx.try_recv(){
+                    Ok(result)=>{
+                        self.win_update_download_rx=None;
+                        self.win_update_message=None;
+                        match result{
+                            Ok(download)=>{
+                                // Current version stays alive if helper creation,
+                                // integrity check or UAC authorization fails.
+                                let digest=self.win_update_latest.as_ref()
+                                    .map(|r|r.digest.as_str()).unwrap_or("");
+                                match windows_update::begin_install(&download,digest){
+                                    Ok(())=>{
+                                        self.persist_settings();
+                                        self.state.stop();
+                                        std::process::exit(0);
+                                    },
+                                    Err(e)=>{
+                                        let _=std::fs::remove_file(&download);
+                                        self.win_update_error=Some(e);
+                                    }
+                                }
+                            },
+                            Err(e)=>self.win_update_error=Some(e),
+                        }
+                    },
+                    Err(TryRecvError::Disconnected)=>{
+                        self.win_update_download_rx=None;
+                        self.win_update_message=None;
+                        self.win_update_error=Some("更新下载线程意外退出".into());
+                    },
+                    Err(TryRecvError::Empty)=>{},
+                }
+            }
+        }
+        #[cfg(target_os="windows")]
+        {
             // The Windows tray must be created on the GUI/message-loop thread.
             // Never hide the window if creating the tray failed.
             if !self.win_tray_attempted && self.frames>=2 {
@@ -1379,6 +1533,10 @@ impl eframe::App for KvmApp {
 }
 
 fn main() -> eframe::Result<()> {
+    #[cfg(target_os="windows")]
+    if windows_update::handle_helper_if_requested(){
+        return Ok(());
+    }
     launch_mark("main-enter");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
