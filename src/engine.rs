@@ -911,7 +911,7 @@ pub fn start_client(shared:Arc<Shared>, s:Settings){
             let result=client_session(&shared,s.clone());
             // Return local pointer ownership before each reconnect. The
             // remote peer may have dropped while the cursor was captured.
-            if shared.active.load(Ordering::SeqCst){shared.return_cursor();}
+            if shared.active.swap(false,Ordering::SeqCst){shared.return_cursor();}
             // A timeout/shutdown may have cleared ready before we arrive here.
             successfully_connected |= shared.session_ever_ready.swap(false,Ordering::SeqCst);
             shared.close();
@@ -1053,6 +1053,11 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
             Ok(msg)=>msg,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout)=>{
                 if heartbeat_timed_out(last_pong,Instant::now()){
+                    // The user might be on the remote screen: release the
+                    // input grab before warping the pointer home.
+                    if shared.active.swap(false,Ordering::SeqCst){
+                        shared.return_cursor();
+                    }
                     shared.shutdown_peer();
                     return Err(UiStatus::HeartbeatTimedOut);
                 }
