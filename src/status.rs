@@ -31,6 +31,7 @@ pub enum UiStatus {
     PeerDisconnected(String),
     TransportClosed(String),
     HeartbeatTimedOut,
+    Reconnecting(String),
     NetworkChanged,
     MouseEntryRejected,
     MouseEntryTimedOut,
@@ -74,6 +75,9 @@ impl UiStatus {
             PeerDisconnected(detail) => format!("{}: {detail}",if zh {"上一个连接已结束"}else{"Previous peer disconnected"}),
             TransportClosed(detail) => format!("{}: {detail}",if zh {"加密连接中断"}else{"Encrypted session closed"}),
             HeartbeatTimedOut => (if zh {"对端心跳超时，连接已断开"}else{"Peer heartbeat timed out; session disconnected"}).into(),
+            Reconnecting(reason) => format!("{}: {reason}",
+                if zh {"连接中断，正在后台自动重连（可点断开取消）"}
+                else {"Connection lost; reconnecting in background (Disconnect to cancel)"}),
             NetworkChanged => (if zh {"本机网络地址已切换，旧连接已断开"}else{"Local network address changed; old session disconnected"}).into(),
             MouseEntryRejected => (if zh {"远端光标定位失败，仍可在本机操作"}else{"Remote cursor placement failed; stayed local"}).into(),
             MouseEntryTimedOut => (if zh {"远端未确认鼠标进入，仍可在本机操作"}else{"Remote entry was not acknowledged; stayed local"}).into(),

@@ -47,10 +47,18 @@ fn frame_read(s:&mut TcpStream)->io::Result<Vec<u8>> {
 
 fn err(e: impl std::fmt::Display)->io::Error {io::Error::new(io::ErrorKind::InvalidData,e.to_string())}
 
+/// A LAN convenience code (6-16 ASCII letters/digits), or the legacy
+/// 32-hex key. Do not alter the byte-to-PSK derivation: beta.28 and earlier
+/// peers with 32-hex keys must keep pairing with this release.
+pub fn valid_pairing_secret(secret:&str)->bool{
+    (secret.len()==32 && secret.bytes().all(|c|c.is_ascii_hexdigit()))
+        || ((6..=16).contains(&secret.len())
+            && secret.bytes().all(|c|c.is_ascii_alphanumeric()))
+}
 fn handshake(s:&mut TcpStream, secret:&str,initiator:bool)->io::Result<snow::TransportState>{
-    // UI generates 128-bit secrets. Refuse low entropy/short manual passwords.
-    if secret.len()!=32 || !secret.bytes().all(|b|b.is_ascii_hexdigit()) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput,"pairing secret must be exactly 32 hex digits"));
+    if !valid_pairing_secret(secret) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput,
+            "pairing key must be 6-16 letters/digits or a legacy 32-hex key"));
     }
     s.set_read_timeout(Some(std::time::Duration::from_secs(4)))?;
     s.set_write_timeout(Some(std::time::Duration::from_secs(4)))?;
@@ -258,5 +266,43 @@ mod clipboard_wire_tests {
             let decoded: Wire = rmp_serde::from_slice(&bytes).unwrap();
             assert_eq!(format!("{message:?}"), format!("{decoded:?}"));
         }
+    }
+}
+
+#[cfg(test)]
+mod pairing_code_tests{
+    use super::*;
+    #[test] fn short_codes_and_legacy_codes_are_accepted(){
+        for key in ["ABC234","GHJK2345","abcdefgh12345678",
+                    "0123456789abcdef0123456789abcdef"]{
+            assert!(valid_pairing_secret(key),"{key}");
+        }
+        for key in ["","12345","ab-1234","hello world",
+                    "1234567890abcdefgh1234","zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"]{
+            assert!(!valid_pairing_secret(key),"{key}");
+        }
+    }
+    #[test] fn letter_case_is_ignored_by_noise_psk_derivation(){
+        let a=Sha256::digest("ABCD2345".to_ascii_lowercase().as_bytes());
+        let b=Sha256::digest("abcd2345".to_ascii_lowercase().as_bytes());
+        assert_eq!(a,b);
+    }
+    #[test] fn encrypted_short_pairing_code_roundtrip(){
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr=listener.local_addr().unwrap();
+        let responder=std::thread::spawn(move||{
+            let (socket,_)=listener.accept().unwrap();
+            let (tx,rx,_,_)=connect(socket,"abcd2345",false).unwrap();
+            tx.send(Wire::Hello{os:Platform::Mac,
+                screen:Screen::new(1000,700),
+                displays:vec![Display{x:0,y:0,w:1000,h:700}]}).unwrap();
+            assert!(matches!(rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(),
+                Wire::Ping(7)));
+        });
+        let (tx,rx,_,_)=connect(TcpStream::connect(addr).unwrap(),"ABCD2345",true).unwrap();
+        assert!(matches!(rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap(),
+            Wire::Hello{..}));
+        tx.send(Wire::Ping(7)).unwrap();
+        responder.join().unwrap();
     }
 }

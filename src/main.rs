@@ -121,7 +121,7 @@ fn side_name(side: Side, lang: Language) -> &'static str {
 
 /// User-edited keys preserve protocol compatibility with deployed peers.
 fn valid_pairing_secret(secret:&str)->bool{
-    secret.len()==32 && secret.bytes().all(|b|b.is_ascii_hexdigit())
+    wire::valid_pairing_secret(secret)
 }
 /// Generate ONLY when there is no saved key; an incomplete user edit should
 /// never be silently replaced on restart (and must not start a connection).
@@ -131,10 +131,12 @@ fn ensure_pairing_secret(settings:&mut Settings)->bool{
     true
 }
 fn generate_secret() -> String {
-    use rand::RngCore;
-    let mut buf = [0_u8;16];
-    rand::thread_rng().fill_bytes(&mut buf);
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+    use rand::Rng;
+    // Eight easy-to-type characters (~40 bits), without 0/1/I/O ambiguity.
+    // The legacy 32-hex secrets remain accepted and unchanged.
+    const CHARS:&[u8]=b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng=rand::thread_rng();
+    (0..8).map(|_|CHARS[rng.gen_range(0..CHARS.len())] as char).collect()
 }
 
 fn generate_port(old: u16) -> u16 {
@@ -502,12 +504,16 @@ impl KvmApp {
     fn save_pairing_key(&mut self)->Result<(),String>{
         let candidate=self.pairing_key_draft.trim();
         if !valid_pairing_secret(candidate){
-            return Err("配对密钥必须是 32 位十六进制字符（0-9、a-f），建议使用随机密钥。 / Use exactly 32 hexadecimal characters.".into());
+            return Err("配对码需要 6–16 位字母或数字，旧版 32 位十六进制密钥也支持。 / Use 6–16 letters/digits or a legacy 32-hex key.".into());
         }
         if self.state.started.load(Ordering::SeqCst){
             return Err("运行中不能修改密钥，请先停止服务或断开连接。 / Stop the session before changing the key.".into());
         }
-        self.settings.secret=candidate.to_ascii_lowercase();
+        // Convenience codes are displayed as uppercase, but key derivation
+        // is case-insensitive. Never rewrite existing legacy hex keys.
+        self.settings.secret=if candidate.len()==32{
+            candidate.to_ascii_lowercase()
+        }else{candidate.to_ascii_uppercase()};
         self.pairing_key_draft=self.settings.secret.clone();
         self.persist_settings();
         Ok(())
@@ -860,7 +866,8 @@ impl KvmApp {
             }
             if !valid_pairing_secret(&self.settings.secret){
                 ui.colored_label(egui::Color32::from_rgb(240,125,110),
-                    tr(lang,"密钥无效：需填写 32 位十六进制字符。","Invalid key: enter exactly 32 hexadecimal characters."));
+                    tr(lang,"配对码无效：请填写 6–16 位字母/数字，或旧版 32 位十六进制密钥。",
+                        "Invalid key: use 6–16 letters/digits or legacy 32-hex key."));
             }
             ui.add_space(9.0);
             if ui.add_enabled(!started && valid_pairing_secret(&self.settings.secret),egui::Button::new(
@@ -1096,8 +1103,8 @@ impl KvmApp {
                         }
                     });
                 });
-                ui.label(tr(lang,"自定义配对密钥（32 位十六进制）",
-                    "Custom pairing key (32 hexadecimal characters)"));
+                ui.label(tr(lang,"自定义配对码（6–16 位字母或数字）",
+                    "Custom pairing code (6–16 letters or digits)"));
                 ui.horizontal_wrapped(|ui|{
                     let can_edit=!self.state.started.load(Ordering::SeqCst);
                     ui.add_enabled(can_edit,egui::TextEdit::singleline(&mut self.pairing_key_draft)
@@ -1116,15 +1123,15 @@ impl KvmApp {
                 });
                 if !valid_pairing_secret(self.pairing_key_draft.trim()){
                     ui.colored_label(egui::Color32::from_rgb(240,125,110),
-                        tr(lang,"请输入恰好 32 个十六进制字符（0–9 / a–f）。",
-                            "Enter exactly 32 hexadecimal characters (0–9 / a–f)."));
+                        tr(lang,"请输入 6–16 位字母/数字；旧版 32 位十六进制密钥也兼容。",
+                            "Use 6–16 letters/digits; legacy 32-hex keys also work."));
                 }
                 if let Some(err)=&self.pairing_key_error{
                     ui.colored_label(egui::Color32::from_rgb(240,125,110),err);
                 }
                 ui.small(tr(lang,
-                    "必须与控制端一致。自定义易猜的密钥会降低安全性；建议随机生成后复制。",
-                    "Must match the controller. Weak custom keys reduce security; random is recommended."));
+                    "另一台电脑填写相同配对码即可；字母不区分大小写。短码方便局域网使用，但安全性低于原来的长密钥。",
+                    "Enter the same code on the other computer; case-insensitive. Short LAN codes are less secure than long keys."));
 
 
             });
@@ -1177,6 +1184,15 @@ impl KvmApp {
                 if rtt==u64::MAX{"—".to_string()}else{format!("{rtt} ms")}));
             ui.label(format!("{}: {} ms",tr(lang,"本次连接 RTT 峰值","Session RTT peak"),
                 self.state.rtt_peak_ms.load(Ordering::Relaxed)));
+            ui.label(format!("{}: {}",
+                tr(lang,"本机鼠标钩子最后活动","Last local mouse hook activity"),
+                match self.state.hook_mouse_idle_ms(){
+                    Some(ms)=>format!("{} s ago",ms/1000),
+                    None=>tr(lang,"本次会话尚无鼠标事件","No mouse event this session").to_string(),
+                }));
+            ui.small(tr(lang,
+                "如果显示已连接但不能跨屏，请移动鼠标并观察这个值是否归零；若不变化，可能是操作系统输入钩子失效。",
+                "If connected but crossing fails, move the mouse and check whether this resets. If not, the OS input hook may be stalled."));
             ui.label(format!("{}: {}",tr(lang,"Windows 原生滚轮数据包","Native wheel packets"),
                 self.state.wheel_packets.load(Ordering::Relaxed)));
             ui.label(format!("{}: {}",tr(lang,"侧键事件（Windows 捕获）","Side button events captured"),
@@ -1710,7 +1726,7 @@ mod ui_deadlock_tests {
     fn generated_pairing_key_is_valid_and_stable(){
         let mut s=Settings::default();
         assert!(ensure_pairing_secret(&mut s));
-        assert_eq!(s.secret.len(),32);
+        assert_eq!(s.secret.len(),8);
         let initial=s.secret.clone();
         assert!(!ensure_pairing_secret(&mut s));
         assert_eq!(s.secret,initial);
@@ -1718,9 +1734,11 @@ mod ui_deadlock_tests {
         assert!(!ensure_pairing_secret(&mut s));
         assert_eq!(s.secret,"not-a-hex-key");
         assert!(!valid_pairing_secret(&s.secret));
+        assert!(valid_pairing_secret("GHJK2345"));
         assert!(valid_pairing_secret("abcdef0123456789abcdef0123456789"));
         assert!(valid_pairing_secret("ABCDEF0123456789ABCDEF0123456789"));
-        assert!(!valid_pairing_secret("abcdef0123456789"));
+        assert!(valid_pairing_secret("abcdef0123456789"));
+        assert!(!valid_pairing_secret("abcde"));
         assert!(!valid_pairing_secret("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
     }
     #[test]

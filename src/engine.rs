@@ -49,7 +49,9 @@ impl MotionScale{
         (x,y)
     }
 }
-const HEARTBEAT_TIMEOUT:Duration=Duration::from_secs(8);
+// Normal LAN activity pings every second. Allow transient scheduling stalls,
+// system wake and Wi-Fi handover without tearing the session down at 8s.
+const HEARTBEAT_TIMEOUT:Duration=Duration::from_secs(30);
 
 fn heartbeat_timed_out(last_response:Instant,now:Instant)->bool{
     now.saturating_duration_since(last_response)>=HEARTBEAT_TIMEOUT
@@ -98,6 +100,12 @@ pub struct Shared {
     clock:Instant,
     pub ready:AtomicBool,
     pub started:AtomicBool,
+    // Updated only when the OS input hook observes a physical mouse move.
+    // The diagnostics page can distinguish a live network from a dead hook.
+    pub last_hook_mouse_ms:AtomicU64,
+    // Latched for each client_session(), even if a heartbeat failure clears
+    // ready before its owning thread sees the failure.
+    session_ever_ready:AtomicBool,
     stop_requested:AtomicBool,
     network_changed:AtomicBool,
     socket:Mutex<Option<TcpStream>>,
@@ -152,6 +160,8 @@ impl Shared {
             rtt_ms:AtomicU64::new(u64::MAX),rtt_peak_ms:AtomicU64::new(0),
             clock:Instant::now(),
             ready:AtomicBool::new(false),started:AtomicBool::new(false),
+            session_ever_ready:AtomicBool::new(false),
+            last_hook_mouse_ms:AtomicU64::new(0),
             capture_started:AtomicBool::new(false),paste_sender:Mutex::new(None),
             #[cfg(target_os="macos")]
             clipboard_ui_tx:Mutex::new(None),
@@ -207,6 +217,12 @@ impl Shared {
         }
         #[cfg(not(target_os="macos"))]
         {clipboard::install(&data)}
+    }
+    pub fn hook_mouse_idle_ms(&self)->Option<u64>{
+        let last=self.last_hook_mouse_ms.load(Ordering::Relaxed);
+        if last==0 {None}else{
+            Some((self.clock.elapsed().as_millis() as u64).saturating_sub(last-1))
+        }
     }
     pub fn local_desktop(&self)->display::Desktop{
         self.local_desktop.lock().unwrap().clone()
@@ -888,17 +904,52 @@ pub fn start_client(shared:Arc<Shared>, s:Settings){
     shared.network_changed.store(false,Ordering::SeqCst);
     *shared.fatal_error.lock().unwrap()=None;
     std::thread::spawn(move ||{
-        let result=client_session(&shared,s);
-        shared.close();
-        // An input hook may fail on another thread and close the socket.
-        // Preserve its diagnostic rather than overwriting it with "Disconnected".
-        let fatal=shared.fatal_error.lock().unwrap().take();
+        let mut successfully_connected=false;
+        loop{
+            shared.session_ever_ready.store(false,Ordering::SeqCst);
+            shared.network_changed.store(false,Ordering::SeqCst);
+            let result=client_session(&shared,s.clone());
+            // Return local pointer ownership before each reconnect. The
+            // remote peer may have dropped while the cursor was captured.
+            if shared.active.load(Ordering::SeqCst){shared.return_cursor();}
+            // A timeout/shutdown may have cleared ready before we arrive here.
+            successfully_connected |= shared.session_ever_ready.swap(false,Ordering::SeqCst);
+            shared.close();
+            let fatal=shared.fatal_error.lock().unwrap().take();
+            if shared.stop_requested.load(Ordering::SeqCst){
+                shared.info(UiStatus::UserDisconnected);
+                break;
+            }
+            if let Some(status)=fatal{
+                // Fatal input-hook failures require explicit user action.
+                shared.info(status);
+                break;
+            }
+            if !successfully_connected{
+                match result{
+                    Err(status)=>shared.info(status),
+                    Ok(())=>shared.info(UiStatus::Disconnected),
+                }
+                break;
+            }
+            // An established session is meant to survive days of inactivity
+            // and a minimized settings window. Recover transparently after
+            // network interruptions; never need a GUI repaint to reconnect.
+            let reason=match result{
+                Err(status)=>status.text(Language::Zh),
+                Ok(())=>"连接已结束".to_string(),
+            };
+            shared.info(UiStatus::Reconnecting(reason));
+            for _ in 0..30 {
+                if shared.stop_requested.load(Ordering::SeqCst){break;}
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if shared.stop_requested.load(Ordering::SeqCst){
+                shared.info(UiStatus::UserDisconnected);
+                break;
+            }
+        }
         shared.started.store(false,Ordering::SeqCst);
-        if shared.stop_requested.load(Ordering::SeqCst) {
-            shared.info(UiStatus::UserDisconnected);
-        } else if let Some(status)=fatal {shared.info(status);}
-        else if let Err(status)=result {shared.info(status);}
-        else {shared.info(UiStatus::Disconnected);}
     });
 }
 
@@ -949,6 +1000,7 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
     let (paste_tx,paste_rx)=mpsc::sync_channel::<()>(16);
     *shared.paste_sender.lock().unwrap()=Some(paste_tx);
     shared.ready.store(true,Ordering::SeqCst);
+    shared.session_ever_ready.store(true,Ordering::SeqCst);
     *shared.owner.lock().unwrap()=Owner::Local;
     shared.info(UiStatus::Ready);
 
@@ -1074,6 +1126,10 @@ fn capture(shared:Arc<Shared>) {
             return Some(event);
         }
         let et=event.event_type.clone();
+        if matches!(&et,EventType::MouseMove{..}){
+            hook_shared.last_hook_mouse_ms.store(
+                hook_shared.clock.elapsed().as_millis() as u64 + 1,Ordering::Relaxed);
+        }
         let remote=hook_shared.active.load(Ordering::Relaxed);
         match et {
             EventType::KeyPress(k)=>{
@@ -1249,8 +1305,9 @@ mod session_liveness_tests{
     #[test]
     fn heartbeat_detects_silent_peer_without_waiting_for_tcp_eof(){
         let t=Instant::now();
-        assert!(!heartbeat_timed_out(t,t+Duration::from_secs(7)));
-        assert!(heartbeat_timed_out(t,t+Duration::from_secs(8)));
+        assert!(!heartbeat_timed_out(t,t+Duration::from_secs(8)));
+        assert!(!heartbeat_timed_out(t,t+Duration::from_secs(29)));
+        assert!(heartbeat_timed_out(t,t+Duration::from_secs(30)));
     }
     #[test]
     fn ip_change_closes_only_connection_on_removed_interface(){
