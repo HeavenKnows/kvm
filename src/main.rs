@@ -12,6 +12,7 @@ mod native_cursor;
 #[cfg(target_os="macos")]
 mod native_keyboard;
 mod display;
+mod update_cache;
 #[cfg(target_os="macos")]
 mod macos_tray;
 #[cfg(target_os="macos")]
@@ -315,6 +316,8 @@ struct KvmApp {
     drag_preview:Option<(i32,i32)>,
     dragging_remote:Option<usize>,
     display_rx:Option<Receiver<display::Desktop>>,
+    display_feedback:Option<String>,
+    update_dir_error:Option<String>,
     ip_rx:Option<Receiver<Vec<Ipv4Addr>>>,
     startup_at:Instant,
     display_loaded:bool,
@@ -439,7 +442,8 @@ impl KvmApp {
             drag_start_group:None,
             drag_start_pointer:None,
             drag_preview:None,dragging_remote:None,
-            display_rx:Some(display_rx),ip_rx:Some(ip_rx),
+            display_rx:Some(display_rx),display_feedback:None,
+            update_dir_error:None,ip_rx:Some(ip_rx),
             startup_at:Instant::now(),display_loaded:false,display_slow:false,
             auto_start_waiting,
             #[cfg(target_os="macos")]
@@ -489,6 +493,22 @@ impl KvmApp {
         }
     }
     fn persist_settings(&self) { model::save(&self.settings); }
+    fn refresh_displays(&mut self,ctx:&egui::Context){
+        if self.display_rx.is_some(){return;}
+        if self.state.ready.load(Ordering::SeqCst){
+            self.display_feedback=Some("请先断开当前连接再刷新显示器；刷新后重新连接另一台电脑。 / Disconnect before refreshing, then reconnect.".into());
+            return;
+        }
+        let (tx,rx)=mpsc::channel();
+        self.display_rx=Some(rx);
+        self.display_feedback=Some("正在重新检测显示器… / Refreshing displays…".into());
+        let ctx=ctx.clone();
+        std::thread::spawn(move||{
+            let desktop=display::current();
+            let _=tx.send(desktop);
+            ctx.request_repaint();
+        });
+    }
     #[cfg(target_os="macos")]
     fn check_online_updates(&mut self,ctx:&egui::Context){
         if self.mac_update_check_rx.is_some() || self.mac_update_download_rx.is_some(){
@@ -540,8 +560,9 @@ impl KvmApp {
                         self.win_update_message=Some(tr(lang,
                             "正在下载并校验新版…","Downloading and verifying update…").into());
                         let ctx=ui.ctx().clone();
+                        let folder=self.settings.update_download_dir.clone();
                         std::thread::spawn(move||{
-                            let _=tx.send(windows_update::download_release(&release));
+                            let _=tx.send(windows_update::download_release(&release,&folder));
                             ctx.request_repaint();
                         });
                     }
@@ -868,8 +889,9 @@ impl KvmApp {
                                     "正在下载更新…","Downloading update…").into());
                                 self.mac_update_error=None;
                                 let ctx=ui.ctx().clone();
+                                let folder=self.settings.update_download_dir.clone();
                                 std::thread::spawn(move||{
-                                    let _=tx.send(macos_update::download_release(&release));
+                                    let _=tx.send(macos_update::download_release(&release,&folder));
                                     ctx.request_repaint();
                                 });
                             }
@@ -905,6 +927,19 @@ impl KvmApp {
     }
 
     fn ui_displays(&mut self,ui:&mut egui::Ui,lang:Language){
+        ui.horizontal_wrapped(|ui|{
+            let scanning=self.display_rx.is_some();
+            let connected=self.state.ready.load(Ordering::SeqCst);
+            if ui.add_enabled(!scanning && !connected,
+                egui::Button::new(tr(lang,"刷新显示器","Refresh monitors"))).clicked(){
+                self.refresh_displays(ui.ctx());
+            }
+            if connected{ui.label(tr(lang,
+                "请先断开连接再刷新，避免控制过程中屏幕布局变化。",
+                "Disconnect before refreshing to protect the active session."));}
+        });
+        if let Some(message)=&self.display_feedback{ui.label(message);}
+        ui.add_space(8.0);
         if self.settings.role_server {
             section_card(ui,tr(lang,"本机显示器","Local monitors"),|ui|{
                 let displays=self.state.local_displays();
@@ -954,6 +989,42 @@ impl KvmApp {
                     #[cfg(target_os="windows")]
                     self.check_windows_updates(ui.ctx());
                 }
+            }
+            ui.add_space(10.0);
+            ui.label(tr(lang,"更新包下载目录（缓存）","Update package download folder (cache)"));
+            // The chosen folder is a parent: only its kvm-updates child is
+            // application-managed. One fixed package name per platform.
+            match update_cache::cache_directory(&self.settings.update_download_dir){
+                Ok(path)=>{ui.small(path.display().to_string());},
+                Err(e)=>{ui.colored_label(egui::Color32::RED,e);}
+            }
+            ui.horizontal_wrapped(|ui|{
+                if ui.button(tr(lang,"选择目录…","Choose folder…")).clicked(){
+                    match update_cache::choose_folder(){
+                        Ok(Some(folder))=>match folder.into_os_string().into_string(){
+                            Ok(folder)=>{
+                                self.settings.update_download_dir=folder;
+                                self.update_dir_error=None;
+                                self.persist_settings();
+                            },
+                            Err(_)=>self.update_dir_error=Some("下载目录包含不支持的文件名字符".into()),
+                        },
+                        Ok(None)=>{},
+                        Err(e)=>self.update_dir_error=Some(e),
+                    }
+                }
+                if !self.settings.update_download_dir.is_empty() &&
+                   ui.button(tr(lang,"恢复系统临时目录","Use system temp folder")).clicked(){
+                    self.settings.update_download_dir.clear();
+                    self.update_dir_error=None;
+                    self.persist_settings();
+                }
+            });
+            ui.small(tr(lang,
+                "每个平台只保存一份已校验安装包；安装失败可重复使用，下载新版本时覆盖旧包。",
+                "One verified installer per platform; reuse after failures, overwrite on newer download."));
+            if let Some(error)=&self.update_dir_error{
+                ui.colored_label(egui::Color32::from_rgb(240,125,110),error);
             }
         });
         ui.add_space(12.0);
@@ -1177,14 +1248,26 @@ impl eframe::App for KvmApp {
                 Ok(desktop)=>{
                     launch_mark("display-result-received");
                     let origin=(desktop.origin_x,desktop.origin_y);
+                    let old=self.state.local_displays();
+                    let count=desktop.displays.len();
                     launch_mark("display-topology-apply-start");
                     if self.state.update_local_desktop(desktop){
                         native_cursor::set_global_origin(origin.0,origin.1);
                         self.display_loaded=true;
                         self.display_slow=false;
+                        let changed=old!=self.state.local_displays();
+                        self.settings.local_display=self.settings.local_display.min(count.saturating_sub(1));
+                        self.state.set_layout_targets(self.settings.local_display,self.settings.remote_display);
+                        self.persist_settings();
+                        self.display_feedback=Some(if changed{
+                            format!("检测到 {count} 台本机显示器，布局已更新。若另一端尚未同步，请双方刷新并重新连接。 / Detected {count} monitors; reconnect peers to sync.")
+                        }else{
+                            format!("刷新完成：{count} 台显示器，布局无变化。 / Refresh complete: {count} monitors.")
+                        });
                         launch_mark("display-topology-apply-done");
                     }else{
                         self.display_slow=true;
+                        self.display_feedback=Some("连接期间不能修改屏幕布局。请断开后重试。 / Disconnect and retry monitor refresh.".into());
                         launch_mark("display-pending-session-restart");
                     }
                     self.display_rx=None;
@@ -1193,6 +1276,7 @@ impl eframe::App for KvmApp {
                 Err(TryRecvError::Disconnected)=>{
                     self.display_rx=None;
                     self.display_slow=true;
+                    self.display_feedback=Some("显示器检测任务未完成，请重试。 / Monitor scan failed; retry.".into());
                     launch_mark("display-worker-disconnected");
                 }
             }
@@ -1286,7 +1370,7 @@ impl eframe::App for KvmApp {
                                         std::process::exit(0);
                                     },
                                     Err(e)=>{
-                                        let _=std::fs::remove_file(&path);
+                                        // Preserve the verified cache after install failure.
                                         self.mac_update_error=Some(e);
                                     }
                                 }
@@ -1360,7 +1444,7 @@ impl eframe::App for KvmApp {
                                         std::process::exit(0);
                                     },
                                     Err(e)=>{
-                                        let _=std::fs::remove_file(&download);
+                                        // Preserve the verified cache after install failure.
                                         self.win_update_error=Some(e);
                                     }
                                 }

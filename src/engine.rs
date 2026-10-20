@@ -219,10 +219,14 @@ impl Shared {
         let d=self.local_desktop.lock().unwrap();
         (d.origin_x,d.origin_y)
     }
-    /// Apply a background monitor scan before a connection starts.
-    /// The session's Hello geometry must not change while a peer is active.
+    /// A receiver can refresh while listening but without an active TCP
+    /// session; otherwise it would require restarting the whole app.
+    /// Never change geometry during an established or authenticating peer
+    /// session: the wire Hello and cursor mapping must stay consistent.
     pub fn update_local_desktop(&self,desktop:display::Desktop)->bool{
-        if self.started.load(Ordering::SeqCst){return false;}
+        if self.ready.load(Ordering::SeqCst) ||
+           self.active.load(Ordering::SeqCst) ||
+           self.socket.lock().unwrap().is_some(){return false;}
         let (w,h)=(desktop.screen().w,desktop.screen().h);
         *self.local_desktop.lock().unwrap()=desktop;
         *self.entry_local.lock().unwrap()=(w/2,h/2);

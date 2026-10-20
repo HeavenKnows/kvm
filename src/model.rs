@@ -188,6 +188,9 @@ pub struct Settings {
     pub auto_start_receiver: bool,
     /// Check for newer Mac releases on application launch (never auto-install).
     pub auto_check_updates: bool,
+    /// Empty uses OS temporary folder; otherwise a selected absolute folder.
+    /// The updater owns only the kvm-updates subdirectory inside this folder.
+    pub update_download_dir:String,
     /// Chosen monitor pair used as the crossing edge anchor.
     pub local_display:usize,
     pub remote_display:usize,
@@ -205,7 +208,7 @@ impl Default for Settings {
         secret:String::new(), layout:Layout::default(),
         shortcut_mappings:crate::input::presets(),clipboard:true,
         language:Language::Zh, listen_port:24881, auto_start_receiver:true,
-        auto_check_updates:true,
+        auto_check_updates:true,update_download_dir:String::new(),
         mouse_speed:1.6,scroll_speed:3.0,side_buttons_native:false,
         local_display:0,remote_display:0,
     } }
@@ -321,6 +324,7 @@ mod tests {
         assert_eq!(s.language,Language::Zh);
         assert!(s.auto_start_receiver);
         assert!(s.auto_check_updates);
+        assert!(s.update_download_dir.is_empty());
         assert_eq!(s.local_display,0);
         assert_eq!(s.remote_display,0);
         assert_eq!(s.mouse_speed,1.6);

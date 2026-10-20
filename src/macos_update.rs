@@ -123,37 +123,43 @@ fn check_sha256(file:&Path,expected:&str)->Result<(),String>{
     if digest!=expected{return Err("下载文件哈希不匹配，已拒绝安装".into());}
     Ok(())
 }
-pub fn download_release(release:&RemoteRelease)->Result<PathBuf,String>{
-    // Do not trust arbitrary URLs returned by a modified API response.
+fn verify_dmg(path:&Path,digest:&str)->Result<(),String>{
+    let len=fs::metadata(path).map_err(|e|format!("无法读取安装包：{e}"))?.len();
+    if !(100_000..=250_000_000).contains(&len){return Err("安装包大小异常".into());}
+    check_sha256(path,digest)
+}
+pub fn download_release(release:&RemoteRelease,folder:&str)->Result<PathBuf,String>{
     if release.url!=asset_url(&release.version) ||
-        semver::Version::parse(&release.version).is_err(){
-        return Err("更新下载地址无效".into());
+        semver::Version::parse(&release.version).is_err() ||
+        release.digest.len()!=64 ||
+        !release.digest.bytes().all(|b|b.is_ascii_hexdigit()){
+        return Err("更新下载地址或校验信息无效".into());
     }
-    let millis=SystemTime::now().duration_since(UNIX_EPOCH)
-        .unwrap_or_default().as_millis();
-    let path=std::env::temp_dir().join(format!(
-        "kvm-update-{}-{millis}.dmg",std::process::id()));
-    let downloaded=Command::new("/usr/bin/curl")
-        .args(["--fail","--location","--silent","--show-error",
-            "--connect-timeout","10","--max-time","180",
-            "--proto","=https","--proto-redir","=https",
-            "--max-filesize","250000000",
-            "--header","User-Agent: kvm-macos-updater"])
-        .arg("--output").arg(&path).arg(&release.url)
-        .output().map_err(|e|format!("下载失败：{e}"))?;
-    if !downloaded.status.success(){
-        let _=fs::remove_file(&path);
-        return Err(format!("下载失败：{}",String::from_utf8_lossy(&downloaded.stderr).trim()));
+    // One stable filename per platform. Never overwrite arbitrary files in
+    // the selected parent directory; only our kvm-updates subdirectory.
+    let path=crate::update_cache::prepare(folder,ASSET_NAME)?;
+    if path.is_file() && verify_dmg(&path,&release.digest).is_ok(){
+        return Ok(path); // Failed installs reuse this verified full DMG.
     }
+    let part=path.with_extension("dmg.part");
+    if part.exists(){fs::remove_file(&part).map_err(|e|format!("无法清理未完成的下载：{e}"))?;}
     let result=(||{
-        let len=fs::metadata(&path).map_err(|e|format!("下载文件不可读：{e}"))?.len();
-        if !(100_000..=250_000_000).contains(&len){
-            return Err("下载文件大小异常".into());
+        let downloaded=Command::new("/usr/bin/curl")
+            .args(["--fail","--location","--silent","--show-error",
+                "--connect-timeout","10","--max-time","180",
+                "--proto","=https","--proto-redir","=https",
+                "--max-filesize","250000000",
+                "--header","User-Agent: kvm-macos-updater"])
+            .arg("--output").arg(&part).arg(&release.url)
+            .output().map_err(|e|format!("下载失败：{e}"))?;
+        if !downloaded.status.success(){
+            return Err(format!("下载失败：{}",String::from_utf8_lossy(&downloaded.stderr).trim()));
         }
-        check_sha256(&path,&release.digest)?;
+        verify_dmg(&part,&release.digest)?;
+        crate::update_cache::replace_verified(&part,&path)?;
         Ok(path.clone())
     })();
-    if result.is_err(){let _=fs::remove_file(&path);}
+    if result.is_err(){let _=fs::remove_file(&part);}
     result
 }
 

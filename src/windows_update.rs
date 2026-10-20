@@ -110,32 +110,37 @@ fn stamp()->u128{
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis()
 }
 
-pub fn download_release(release:&Release)->Result<PathBuf,String>{
+pub fn download_release(release:&Release,folder:&str)->Result<PathBuf,String>{
     if release.url!=expected_url(&release.version)
        ||semver::Version::parse(&release.version).is_err()
        ||!valid_digest(&release.digest){
         return Err("更新包地址或校验信息无效".into());
     }
-    let path=std::env::temp_dir().join(format!("kvm-download-{}-{}.exe",
-        std::process::id(),stamp()));
-    let out=Command::new("curl.exe")
-        .args(["--fail","--location","--silent","--show-error",
-            "--connect-timeout","10","--max-time","240",
-            "--proto","=https","--proto-redir","=https",
-            "--max-filesize","250000000",
-            "--header","User-Agent: kvm-windows-updater"])
-        .arg("--output").arg(&path).arg(&release.url)
-        .creation_flags_no_window().output()
-        .map_err(|e|format!("Windows 下载工具无法启动：{e}"))?;
-    if !out.status.success(){
-        let _=fs::remove_file(&path);
-        return Err(format!("下载失败：{}",String::from_utf8_lossy(&out.stderr).trim()));
+    let path=crate::update_cache::prepare(folder,NAME)?;
+    if path.is_file() && verify_exe(&path,&release.digest).is_ok(){
+        return Ok(path); // Reuse exactly matching verified installer.
     }
-    if let Err(e)=verify_exe(&path,&release.digest){
-        let _=fs::remove_file(&path);
-        return Err(e);
-    }
-    Ok(path)
+    let part=path.with_extension("exe.part");
+    if part.exists(){fs::remove_file(&part).map_err(|e|format!("无法清理下载临时文件：{e}"))?;}
+    let result=(||{
+        let out=Command::new("curl.exe")
+            .args(["--fail","--location","--silent","--show-error",
+                "--connect-timeout","10","--max-time","240",
+                "--proto","=https","--proto-redir","=https",
+                "--max-filesize","250000000",
+                "--header","User-Agent: kvm-windows-updater"])
+            .arg("--output").arg(&part).arg(&release.url)
+            .creation_flags_no_window().output()
+            .map_err(|e|format!("Windows 下载工具无法启动：{e}"))?;
+        if !out.status.success(){
+            return Err(format!("下载失败：{}",String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        verify_exe(&part,&release.digest)?;
+        crate::update_cache::replace_verified(&part,&path)?;
+        Ok(path.clone())
+    })();
+    if result.is_err(){let _=fs::remove_file(&part);}
+    result
 }
 
 #[link(name="kernel32")]
@@ -231,7 +236,8 @@ fn finalize_install(pid:u32,source:&Path,target:&Path,digest:&str)->Result<(),St
     let backup=target.with_file_name(format!("{}.kvm-backup",
         target.file_name().ok_or("程序文件名无效")?.to_string_lossy()));
     let _=fs::remove_file(backup);
-    let _=fs::remove_file(source);
+    // Keep the verified package for retries and offline reuse; the next
+    // newer release will replace it under the same cache filename.
     Ok(())
 }
 
