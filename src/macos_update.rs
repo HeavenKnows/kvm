@@ -59,7 +59,7 @@ fn choose_dmg()->Result<PathBuf,String>{
 pub struct RemoteRelease{
     pub version:String,
     url:String,
-    digest:Option<String>,
+    digest:String,
 }
 const RELEASES_API:&str="https://api.github.com/repos/HeavenKnows/kvm/releases?per_page=20";
 const ASSET_NAME:&str="kvm-macos-arm64.dmg";
@@ -86,12 +86,12 @@ fn parse_releases(bytes:&[u8],current:&str)->Result<Option<RemoteRelease>,String
                 a.get("name").and_then(|v|v.as_str())==Some(ASSET_NAME) &&
                 a.get("browser_download_url").and_then(|v|v.as_str())==Some(&expected)
             )) else{continue;};
-        // GitHub's API may include an asset SHA-256 digest. Use it when
-        // available, but old API responses without a digest also work.
-        let digest=asset.get("digest").and_then(|v|v.as_str())
+        // Reject releases without a verifiable SHA-256. All our published
+        // GitHub Release assets provide an official digest.
+        let Some(digest)=asset.get("digest").and_then(|v|v.as_str())
             .and_then(|v|v.strip_prefix("sha256:"))
             .filter(|v|v.len()==64 && v.bytes().all(|b|b.is_ascii_hexdigit()))
-            .map(|v|v.to_ascii_lowercase());
+            .map(|v|v.to_ascii_lowercase())else{continue;};
         best=Some((ver,RemoteRelease{
             version:version_text.to_owned(),url:expected,digest,
         }));
@@ -150,7 +150,7 @@ pub fn download_release(release:&RemoteRelease)->Result<PathBuf,String>{
         if !(100_000..=250_000_000).contains(&len){
             return Err("下载文件大小异常".into());
         }
-        if let Some(digest)=&release.digest{check_sha256(&path,digest)?;}
+        check_sha256(&path,&release.digest)?;
         Ok(path.clone())
     })();
     if result.is_err(){let _=fs::remove_file(&path);}
@@ -180,6 +180,15 @@ fn launch(downloaded:Option<&Path>)->Result<(),String>{
     let original_script=bundle.join("Contents/Resources/install-kvm.sh");
     if !original_script.is_file(){
         return Err("此版本不含图形更新组件，请安装 beta.21 或更新版本".into());
+    }
+    // Preflight while the GUI is still running: a missing keychain should
+    // show an actionable error, not close the app and silently lose control.
+    let keychain=Command::new("/bin/bash").arg(&original_script)
+        .arg("--check-keychain").output()
+        .map_err(|e|format!("无法检查 macOS 登录钥匙串：{e}"))?;
+    if !keychain.status.success(){
+        return Err(format!("无法使用 macOS 登录钥匙串。请打开“钥匙串访问”确认登录钥匙串存在，然后重试。{}",
+            String::from_utf8_lossy(&keychain.stderr).chars().take(300).collect::<String>()));
     }
     let millis=SystemTime::now().duration_since(UNIX_EPOCH)
         .unwrap_or_default().as_millis();
@@ -258,7 +267,7 @@ mod tests{
         let data=serde_json::to_vec(&releases).unwrap();
         let result=parse_releases(&data,"0.5.0-beta.22").unwrap().unwrap();
         assert_eq!(result.version,"0.5.0-beta.24");
-        assert_eq!(result.digest.as_ref().unwrap(),&"a".repeat(64));
+        assert_eq!(result.digest,&"a".repeat(64));
         assert!(parse_releases(&data,"0.5.0-beta.26").unwrap().is_none());
     }
     #[test]

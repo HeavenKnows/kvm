@@ -1,5 +1,14 @@
 # kvm — Windows ↔ macOS 键鼠共享（Rust 原型）
 
+## 0.5.0-beta.26：macOS 更新钥匙串兼容性修复
+
+- 发现 beta.24/25 在部分真实 Mac 更新时报 `SecKeychainItemImport: The specified keychain could not be found`。修复了 `security default-keychain` 返回带引号、空白或已失效路径时的处理：检查钥匙串文件、尝试用户搜索列表与登录钥匙串回退；无可用钥匙串时给出明确的提示，**不替换旧版**。长期签名仍必须由本机用户的有效钥匙串完成，不绕过 macOS 安全限制。
+- macOS 应用在退出准备更新之前增加钥匙串存在性预检查；官方在线更新现**强制要求** GitHub Release Asset SHA-256，通过后才安装。CI 增加带空格/中文路径、无效默认钥匙串及缺失钥匙串的回归测试。
+- **更新下载的是完整包，不是差分包：** Mac 为完整 `kvm-macos-arm64.dmg`（系统临时目录下 `kvm-update-*.dmg`），Windows 为完整 `kvm.exe`（临时目录下 `kvm-download-*.exe`）。自动更新成功后清理下载包；默认没有让用户自选下载目录，需另行开发“保存安装包到指定位置”功能。
+- **从旧版迁移注意：** beta.24/25 已嵌入的安装脚本不能因线上新版本而自动改变。如果旧版更新持续因钥匙串错误而失败，可以先在 macOS“钥匙串访问”里检查登录钥匙串并重试；仍失败则需从 beta.26 DMG **手动拖拽替换一次**，之后使用新版内置的程序内更新。手动替换可能需要重新授予辅助功能权限。
+- Windows beta.25 在线更新已构建通过；带 UAC 的升级、杀毒软件拦截、自动重启和 macOS 真实钥匙串/辅助功能权限继承仍需两端实机验收。CI 成功不代表这些交互已经验证。
+
+
 > **版本：0.5.0-beta.25，实验源码版。** GitHub Actions 检查 Windows x64 与 macOS Apple Silicon 两个平台的编译与单元测试；通过 CI 不等于完成 Windows/macOS 实机功能、系统剪贴板行为或低延迟验证。
 
 ## 能做什么、还不能做什么

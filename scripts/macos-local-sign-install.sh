@@ -58,19 +58,13 @@ clean(){
 trap clean EXIT
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]];then
   cat <<'USAGE'
-kvm personal macOS installer / updater
+kvm local signer and in-app updater (bundled within kvm.app)
 
-1. Quit the old kvm from the Mac menu bar.
-2. Mount the downloaded kvm-macos-arm64.dmg.
-3. In Terminal, run:
-      /bin/bash "/Volumes/kvm/install-kvm.sh"
-   If your volume is named "kvm 1", type "/bin/bash " then drag
-   install-kvm.sh from the DMG into Terminal and press Return.
-4. Open /Applications/kvm.app.
+First install: open the DMG and drag kvm.app to Applications.
+Later: use kvm Overview -> Check for updates -> Download & install.
+No shell script is needed for normal installation or updating.
+Diagnostic only: bash install-kvm.sh --check-keychain
 
-Always use this script for subsequent updates: drag-and-drop overwrites
-the stable local signature and can reset macOS Accessibility permission.
-Do not run with sudo. Certificate/private key stay in your login keychain.
 USAGE
   exit 0
 fi
@@ -83,25 +77,53 @@ if [[ -n "$WAIT_PID" ]];then
   done
   kill -0 "$WAIT_PID" 2>/dev/null&&err "Old kvm is still running; quit it first."
 fi
+# security output is display-formatted: quoted, sometimes indented.
+# Normalize and validate the actual keychain before importing a private key.
+normalize_keychain(){
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  if [[ "$value" == \"*\" ]];then value="${value:1:${#value}-2}";fi
+  if [[ "$value" == "~/"* ]];then value="$HOME/${value:2}";fi
+  [[ "$value" == /* && -f "$value" ]]||return 1
+  printf '%s\n' "$value"
+}
+resolve_keychain(){
+  local raw candidate
+  if [[ -n "${KVM_KEYCHAIN_PATH:-}" ]];then
+    normalize_keychain "$KVM_KEYCHAIN_PATH" ||
+      { echo "kvm: KVM_KEYCHAIN_PATH does not point to an existing keychain." >&2;return 1; }
+    return
+  fi
+  raw="$(security default-keychain -d user 2>/dev/null || true)"
+  if candidate="$(normalize_keychain "$raw")";then printf '%s\n' "$candidate";return;fi
+  while IFS= read -r raw;do
+    if candidate="$(normalize_keychain "$raw")";then
+      printf '%s\n' "$candidate";return
+    fi
+  done < <(security list-keychains -d user 2>/dev/null || true)
+  for raw in "$HOME/Library/Keychains/login.keychain-db" "$HOME/Library/Keychains/login.keychain";do
+    if candidate="$(normalize_keychain "$raw")";then
+      printf '%s\n' "$candidate";return
+    fi
+  done
+  echo "kvm: No accessible user keychain. Open Keychain Access, restore/select your login keychain, then retry." >&2
+  return 1
+}
 hash(){
-  security find-identity -v -p codesigning 2>/dev/null|awk -F'"' -v cn="$NAME" \
+  security find-identity -v -p codesigning "$1" 2>/dev/null | awk -F'"' -v cn="$NAME" \
     '$2==cn{n=$1;sub(/^[[:space:]]+[0-9]+\)[[:space:]]+/,"",n);gsub(/[[:space:]]/,"",n);print n;exit}'
 }
 work(){ if [[ -z "$TMP" ]];then TMP="$(mktemp -d "${TMPDIR:-/tmp/}kvm-sign.XXXXXXXX")";fi; }
 setup(){
   local h chain password
-  h="$(hash)"
+  chain="$(resolve_keychain)" || err "未找到可用的用户钥匙串。请在“钥匙串访问”中检查登录钥匙串。"
+  h="$(hash "$chain")"
   if [[ -n "$h" ]];then printf '%s\n' "$h";return;fi
-  if security find-certificate -c "$NAME" >/dev/null 2>&1;then
-    err "Previous local cert is invalid; repair it in Keychain Access, do not rotate it."
+  if security find-certificate -c "$NAME" "$chain" >/dev/null 2>&1;then
+    err "Existing local certificate is unavailable for code signing in the selected keychain; unlock or repair it in Keychain Access."
   fi
   work
-  # CI may provide a temporary user keychain explicitly. Ordinary Macs
-  # continue using their current default login keychain.
-  chain="${KVM_KEYCHAIN_PATH:-$(security default-keychain -d user|tr -d '"')}"
-  # Keychains can be managed by securityd and need not appear to this
-  # shell as a regular file; let "security import" validate the keychain.
-  [[ -n "$chain" ]]||err "No default user keychain was selected."
   password="$(openssl rand -hex 24)"
   cat >"$TMP/cert.conf" <<'CONF'
 [req]
@@ -128,14 +150,20 @@ CONF
   # Restrict trust to user-level code signing, not SSL or the system trust store.
   security add-trusted-cert -r trustRoot -p codeSign -k "$chain" "$TMP/cert.pem" >/dev/null||
     err "User Code Signing trust failed. Inspect Keychain Access."
-  h="$(hash)"
-  [[ -n "$h" ]]||err "Signing identity is not valid."
+  h="$(hash "$chain")"
+  [[ -n "$h" ]]||err "Signing identity is not valid in the selected user keychain."
   say "Signing key saved in login keychain. Never delete or regenerate it."
   printf '%s\n' "$h"
 }
+if [[ "${1:-}" == "--check-keychain" ]];then
+  chain="$(resolve_keychain)"||err "没有可用的用户登录钥匙串。"
+  say "Usable user keychain: $chain"
+  exit 0
+fi
 if [[ "${1:-}" == "--setup" ]];then setup >/dev/null;say "Local signing initialized.";exit 0;fi
 if [[ "${1:-}" == "--check" ]];then
-  h="$(hash)";[[ -n "$h" ]]||err "Run --setup first."
+  chain="$(resolve_keychain)"||err "没有可用的用户登录钥匙串。"
+  h="$(hash "$chain")";[[ -n "$h" ]]||err "Run --setup first."
   say "Local signing identity: $h"
   if [[ -d "$DEST" ]];then codesign -d -r- "$DEST" 2>&1|grep 'designated =>'||true;fi
   exit 0
@@ -165,8 +193,9 @@ if pgrep -x kvm >/dev/null;then err "Quit running kvm from the menu bar first.";
 ditto "$SOURCE" "$TMP/kvm.app"
 h="$(setup|tail -n 1)"||err "Could not initialize the personal signing certificate."
 [[ "$h" =~ ^[[:xdigit:]]{40}$ ]]||err "Invalid signing identity."
+chain="$(resolve_keychain)"||err "签名钥匙串不可用。"
 req="designated => identifier \"$ID\" and certificate leaf = H\"$h\""
-codesign --force --sign "$h" --timestamp=none -r "$req" "$TMP/kvm.app"||
+codesign --force --sign "$h" --keychain "$chain" --timestamp=none -r "$req" "$TMP/kvm.app"||
   err "Signing failed. Check your Keychain Access permissions."
 codesign --verify --strict "$TMP/kvm.app"||err "Signed app could not be verified."
 newdr="$(codesign -d -r- "$TMP/kvm.app" 2>&1|grep 'designated =>'|sed 's#^[[:space:]]*##')"

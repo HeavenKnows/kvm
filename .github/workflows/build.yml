@@ -55,6 +55,11 @@ jobs:
         shell: bash
         run: bash -n scripts/macos-local-sign-install.sh
 
+      - name: Test macOS keychain resolver with simulated keychain output
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/test-macos-keychain.sh
+
       - name: Build optimized binary
         shell: bash
         run: cargo build --release --target "${{ matrix.target }}"
@@ -86,7 +91,7 @@ jobs:
             <key>CFBundleExecutable</key><string>kvm</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>0.5.0</string>
-            <key>CFBundleVersion</key><string>25</string>
+            <key>CFBundleVersion</key><string>26</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>LSUIElement</key><true/>
             <key>NSHighResolutionCapable</key><true/>
