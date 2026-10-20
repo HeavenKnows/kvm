@@ -267,7 +267,7 @@ mod tests{
         let data=serde_json::to_vec(&releases).unwrap();
         let result=parse_releases(&data,"0.5.0-beta.22").unwrap().unwrap();
         assert_eq!(result.version,"0.5.0-beta.24");
-        assert_eq!(result.digest,&"a".repeat(64));
+        assert_eq!(result.digest,"a".repeat(64));
         assert!(parse_releases(&data,"0.5.0-beta.26").unwrap().is_none());
     }
     #[test]
