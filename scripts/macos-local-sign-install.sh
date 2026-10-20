@@ -111,16 +111,22 @@ resolve_keychain(){
   return 1
 }
 hash(){
-  security find-identity -v -p codesigning "$1" 2>/dev/null | awk -F'"' -v cn="$NAME" \
+  local keychains=()
+  if [[ $# -gt 0 ]];then keychains=("$1");fi
+  security find-identity -v -p codesigning "${keychains[@]}" 2>/dev/null | awk -F'"' -v cn="$NAME" \
     '$2==cn{n=$1;sub(/^[[:space:]]+[0-9]+\)[[:space:]]+/,"",n);gsub(/[[:space:]]/,"",n);print n;exit}'
 }
 work(){ if [[ -z "$TMP" ]];then TMP="$(mktemp -d "${TMPDIR:-/tmp/}kvm-sign.XXXXXXXX")";fi; }
 setup(){
   local h chain password
+  # Preserve a prior signing identity even if the default keychain changes.
+  h="$(hash)"
+  if [[ -n "$h" ]];then printf '%s\n' "$h";return;fi
   chain="$(resolve_keychain)" || err "未找到可用的用户钥匙串。请在“钥匙串访问”中检查登录钥匙串。"
   h="$(hash "$chain")"
   if [[ -n "$h" ]];then printf '%s\n' "$h";return;fi
-  if security find-certificate -c "$NAME" "$chain" >/dev/null 2>&1;then
+  if security find-certificate -c "$NAME" >/dev/null 2>&1 ||
+     security find-certificate -c "$NAME" "$chain" >/dev/null 2>&1;then
     err "Existing local certificate is unavailable for code signing in the selected keychain; unlock or repair it in Keychain Access."
   fi
   work
@@ -156,6 +162,7 @@ CONF
   printf '%s\n' "$h"
 }
 if [[ "${1:-}" == "--check-keychain" ]];then
+  if [[ -n "$(hash)" ]];then say "Existing signing identity is accessible.";exit 0;fi
   chain="$(resolve_keychain)"||err "没有可用的用户登录钥匙串。"
   say "Usable user keychain: $chain"
   exit 0
@@ -193,9 +200,13 @@ if pgrep -x kvm >/dev/null;then err "Quit running kvm from the menu bar first.";
 ditto "$SOURCE" "$TMP/kvm.app"
 h="$(setup|tail -n 1)"||err "Could not initialize the personal signing certificate."
 [[ "$h" =~ ^[[:xdigit:]]{40}$ ]]||err "Invalid signing identity."
-chain="$(resolve_keychain)"||err "签名钥匙串不可用。"
 req="designated => identifier \"$ID\" and certificate leaf = H\"$h\""
-codesign --force --sign "$h" --keychain "$chain" --timestamp=none -r "$req" "$TMP/kvm.app"||
+sign_args=(--force --sign "$h" --timestamp=none -r "$req")
+if [[ "$(hash)" != "$h" ]];then
+  chain="$(resolve_keychain)"||err "签名钥匙串不可用。"
+  sign_args+=(--keychain "$chain")
+fi
+codesign "${sign_args[@]}" "$TMP/kvm.app"||
   err "Signing failed. Check your Keychain Access permissions."
 codesign --verify --strict "$TMP/kvm.app"||err "Signed app could not be verified."
 newdr="$(codesign -d -r- "$TMP/kvm.app" 2>&1|grep 'designated =>'|sed 's#^[[:space:]]*##')"
