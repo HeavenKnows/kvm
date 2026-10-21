@@ -1,8 +1,8 @@
 package dev.heavenknows.kvmreader
 
-import org.junit.Assert.assertFalse
+import org.junit.Assert.assertArrayEquals\nimport org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Test
+import org.junit.Test\nimport java.net.ServerSocket\nimport java.net.Socket\nimport java.util.concurrent.atomic.AtomicReference
 
 class PairingKeyValidatorTest {
     @Test fun acceptsLegacyHexKey() {
@@ -18,6 +18,29 @@ class PairingKeyValidatorTest {
         assertTrue(upper.contentEquals(lower))
         assertTrue(upper.size == 32)
     }
+    @Test fun noiseHandshakeAndEncryptedFramesRoundTrip() {
+        val server = ServerSocket(0)
+        val received = AtomicReference<ByteArray?>()
+        val responder = Thread {
+            server.accept().use { socket ->
+                NoiseSession.accept(socket, "ABC234").use { session ->
+                    received.set(session.receive())
+                    session.send("ack".toByteArray(Charsets.UTF_8))
+                }
+            }
+            server.close()
+        }
+        responder.start()
+        Socket("127.0.0.1", server.localPort).use { socket ->
+            NoiseSession.connect(socket, "abc234").use { session ->
+                session.send("ping".toByteArray(Charsets.UTF_8))
+                assertArrayEquals("ack".toByteArray(Charsets.UTF_8), session.receive())
+            }
+        }
+        responder.join(5_000)
+        assertArrayEquals("ping".toByteArray(Charsets.UTF_8), received.get())
+    }
+
     @Test fun rejectsInvalidKeys() {
         assertFalse(PairingKeyValidator.isValid("abc12"))
         assertFalse(PairingKeyValidator.isValid("0123456789abcdef0123456789abcdeg"))
