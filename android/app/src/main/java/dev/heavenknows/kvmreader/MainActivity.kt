@@ -43,7 +43,7 @@ class MainActivity : Activity() {
         pairingKey = EditText(this).apply {
             hint = "32 位十六进制密钥，或 6–16 位字母/数字码"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-            singleLine = true
+            setSingleLine(true)
         }
         content.addView(pairingKey, matchWrap())
         content.addView(button("检查配对码格式") {
