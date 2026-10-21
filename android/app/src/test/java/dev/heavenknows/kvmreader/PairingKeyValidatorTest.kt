@@ -1,8 +1,12 @@
 package dev.heavenknows.kvmreader
 
-import org.junit.Assert.assertArrayEquals\nimport org.junit.Assert.assertFalse
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Test\nimport java.net.ServerSocket\nimport java.net.Socket\nimport java.util.concurrent.atomic.AtomicReference
+import org.junit.Test
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.atomic.AtomicReference
 
 class PairingKeyValidatorTest {
     @Test fun acceptsLegacyHexKey() {
