@@ -18,4 +18,8 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
 }
-dependencies { testImplementation("junit:junit:4.13.2") }
+dependencies {
+    implementation("com.github.auties00:noise-java:1.2")
+    implementation("org.msgpack:msgpack-core:0.9.8")
+    testImplementation("junit:junit:4.13.2")
+}
