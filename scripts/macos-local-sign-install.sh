@@ -26,7 +26,7 @@ show_dialog(){
   end run' "$1" >/dev/null 2>&1||true
 }
 err(){ echo "kvm: $*" >&2;show_dialog "安装失败。请查看 ~/Library/Logs/kvm-updater.log。$*";exit 1; }
-say(){ echo "kvm: $*"; }
+say(){ echo "kvm: $*" >&2; }
 clean(){
   if [[ "$MOUNTED" == 1 ]];then hdiutil detach "$TMP/mount" -quiet >/dev/null 2>&1||true;fi
   if [[ -n "$TMP" && -d "$TMP" ]];then rm -rf "$TMP";fi
@@ -86,6 +86,9 @@ normalize_keychain(){
   if [[ "$value" == \"*\" ]];then value="${value:1:${#value}-2}";fi
   if [[ "$value" == "~/"* ]];then value="$HOME/${value:2}";fi
   [[ "$value" == /* && -f "$value" ]]||return 1
+  # A file existing on disk is not enough: stale paths and arbitrary files
+  # can still make security(1) return "specified keychain could not be found".
+  security show-keychain-info "$value" >/dev/null 2>&1 || return 1
   printf '%s\n' "$value"
 }
 resolve_keychain(){
@@ -111,9 +114,16 @@ resolve_keychain(){
   return 1
 }
 hash(){
-  local keychains=()
-  if [[ $# -gt 0 ]];then keychains=("$1");fi
-  security find-identity -v -p codesigning "${keychains[@]}" 2>/dev/null | awk -F'"' -v cn="$NAME" \
+  local identities
+  # Do not expand an empty Bash array under set -u: the system /bin/bash on
+  # macOS can abort here with "keychains[@]: unbound variable". The old code
+  # then treated a valid identity as missing and tried to import a new one.
+  if [[ $# -gt 0 ]];then
+    identities="$(security find-identity -v -p codesigning "$1" 2>/dev/null || true)"
+  else
+    identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$identities" | awk -F'"' -v cn="$NAME" \
     '$2==cn{n=$1;sub(/^[[:space:]]+[0-9]+\)[[:space:]]+/,"",n);gsub(/[[:space:]]/,"",n);print n;exit}'
 }
 work(){ if [[ -z "$TMP" ]];then TMP="$(mktemp -d "${TMPDIR:-/tmp/}kvm-sign.XXXXXXXX")";fi; }
@@ -198,7 +208,10 @@ codesign --verify --strict "$SOURCE" ||
   err "Downloaded kvm.app is modified or corrupt. Download it again from the project Actions."
 if pgrep -x kvm >/dev/null;then err "Quit running kvm from the menu bar first.";fi
 ditto "$SOURCE" "$TMP/kvm.app"
-h="$(setup|tail -n 1)"||err "Could not initialize the personal signing certificate."
+# setup() writes diagnostics to stderr and returns only the certificate hash.
+# Avoid a tail pipeline, which could hide setup failures and build an invalid
+# designated requirement from an empty hash.
+h="$(setup)"||err "Could not initialize the personal signing certificate."
 [[ "$h" =~ ^[[:xdigit:]]{40}$ ]]||err "Invalid signing identity."
 req="designated => identifier \"$ID\" and certificate leaf = H\"$h\""
 sign_args=(--force --sign "$h" --timestamp=none -r "$req")
