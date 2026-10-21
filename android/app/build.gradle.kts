@@ -19,7 +19,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 dependencies {
-    implementation("com.github.auties00:noise-java:1.2")
+    implementation("ch.trancee:noise-protocol-v2:0.1.0")
     implementation("org.msgpack:msgpack-core:0.9.8")
     testImplementation("junit:junit:4.13.2")
 }
