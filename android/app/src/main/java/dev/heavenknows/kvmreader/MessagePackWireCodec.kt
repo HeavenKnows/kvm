@@ -164,10 +164,10 @@ object MessagePackWireCodec {
         return entry.key.string() to entry.value
     }
 
-    private fun Value.array() = asArrayValue().list()
-    private fun Value.string() = asStringValue().string
-    private fun Value.int() = asIntegerValue().toInt()
-    private fun Value.long() = asIntegerValue().toLong()
+    private fun Value.array(): List<Value> = this.asArrayValue().list()
+    private fun Value.string(): String = this.asStringValue().string
+    private fun Value.int(): Int = this.asIntegerValue().toInt()
+    private fun Value.long(): Long = this.asIntegerValue().toLong()
     private fun Value.double(): Double = when {
         isFloatValue -> asFloatValue().toDouble()
         isIntegerValue -> asIntegerValue().toLong().toDouble()
