@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <string name="app_name">kvm 阅读器接收端</string>
-    <string name="accessibility_service_name">kvm 键鼠辅助服务</string>
-    <string name="accessibility_service_description">允许用户启用后执行触摸手势，并将文本输入到当前焦点文本框。</string>
-</resources>
