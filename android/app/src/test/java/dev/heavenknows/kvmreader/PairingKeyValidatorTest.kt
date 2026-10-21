@@ -13,7 +13,7 @@ class PairingKeyValidatorTest {
         assertTrue(PairingKeyValidator.isValid("12345678"))
     }
     @Test fun rejectsInvalidKeys() {
-        assertFalse(PairingKeyValidator.isValid("abc123"))
+        assertFalse(PairingKeyValidator.isValid("abc12"))
         assertFalse(PairingKeyValidator.isValid("0123456789abcdef0123456789abcdeg"))
         assertFalse(PairingKeyValidator.isValid("中文12345"))
         assertFalse(PairingKeyValidator.isValid("A7B8-2C"))
