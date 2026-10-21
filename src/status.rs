@@ -32,6 +32,7 @@ pub enum UiStatus {
     TransportClosed(String),
     HeartbeatTimedOut,
     Reconnecting(String),
+    ReconnectStopped(String),
     NetworkChanged,
     MouseEntryRejected,
     MouseEntryTimedOut,
@@ -78,6 +79,11 @@ impl UiStatus {
             Reconnecting(reason) => format!("{}: {reason}",
                 if zh {"连接中断，正在后台自动重连（可点断开取消）"}
                 else {"Connection lost; reconnecting in background (Disconnect to cancel)"}),
+            ReconnectStopped(addr) => if zh {
+                format!("连续 5 次连接被拒绝（{addr}），已停止自动重连。请启动接收端后手动重新连接。")
+            } else {
+                format!("Connection refused 5 times ({addr}); auto-reconnect stopped. Start the receiver and reconnect manually.")
+            },
             NetworkChanged => (if zh {"本机网络地址已切换，旧连接已断开"}else{"Local network address changed; old session disconnected"}).into(),
             MouseEntryRejected => (if zh {"远端光标定位失败，仍可在本机操作"}else{"Remote cursor placement failed; stayed local"}).into(),
             MouseEntryTimedOut => (if zh {"远端未确认鼠标进入，仍可在本机操作"}else{"Remote entry was not acknowledged; stayed local"}).into(),

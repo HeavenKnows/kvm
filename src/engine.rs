@@ -52,6 +52,14 @@ impl MotionScale{
 // Normal LAN activity pings every second. Allow transient scheduling stalls,
 // system wake and Wi-Fi handover without tearing the session down at 8s.
 const HEARTBEAT_TIMEOUT:Duration=Duration::from_secs(30);
+// Stop background reconnecting after five consecutive TCP connection refusals.
+// At the normal three-second cadence this gives a receiver restart ~15 seconds.
+const REFUSED_RECONNECT_LIMIT:u32=5;
+
+fn next_refused_reconnect_count(current:u32,session_was_ready:bool,connection_refused:bool)->u32{
+    if session_was_ready || !connection_refused { 0 }
+    else { current.saturating_add(1) }
+}
 
 fn heartbeat_timed_out(last_response:Instant,now:Instant)->bool{
     now.saturating_duration_since(last_response)>=HEARTBEAT_TIMEOUT
@@ -905,6 +913,7 @@ pub fn start_client(shared:Arc<Shared>, s:Settings){
     *shared.fatal_error.lock().unwrap()=None;
     std::thread::spawn(move ||{
         let mut successfully_connected=false;
+        let mut consecutive_refused=0u32;
         loop{
             shared.session_ever_ready.store(false,Ordering::SeqCst);
             shared.network_changed.store(false,Ordering::SeqCst);
@@ -913,7 +922,13 @@ pub fn start_client(shared:Arc<Shared>, s:Settings){
             // remote peer may have dropped while the cursor was captured.
             if shared.active.swap(false,Ordering::SeqCst){shared.return_cursor();}
             // A timeout/shutdown may have cleared ready before we arrive here.
-            successfully_connected |= shared.session_ever_ready.swap(false,Ordering::SeqCst);
+            let session_was_ready=shared.session_ever_ready.swap(false,Ordering::SeqCst);
+            successfully_connected |= session_was_ready;
+            consecutive_refused=next_refused_reconnect_count(
+                consecutive_refused,
+                session_was_ready,
+                matches!(&result,Err(UiStatus::ConnectRefused(_))),
+            );
             shared.close();
             let fatal=shared.fatal_error.lock().unwrap().take();
             if shared.stop_requested.load(Ordering::SeqCst){
@@ -932,9 +947,16 @@ pub fn start_client(shared:Arc<Shared>, s:Settings){
                 }
                 break;
             }
-            // An established session is meant to survive days of inactivity
-            // and a minimized settings window. Recover transparently after
-            // network interruptions; never need a GUI repaint to reconnect.
+            // A refusal means the saved address is reachable but nothing is
+            // listening there (commonly because the receiver app exited).
+            // Allow a short restart window, then stop instead of retrying
+            // forever. Successful sessions reset the refusal counter.
+            if consecutive_refused>=REFUSED_RECONNECT_LIMIT{
+                shared.info(UiStatus::ReconnectStopped(s.address.clone()));
+                break;
+            }
+            // Keep recovering from transient transport/Wi-Fi interruptions.
+            // This loop is independent of GUI repaint and survives minimized UI.
             let reason=match result{
                 Err(status)=>status.text(Language::Zh),
                 Ok(())=>"连接已结束".to_string(),
@@ -1307,6 +1329,17 @@ mod tests {
 #[cfg(test)]
 mod session_liveness_tests{
     use super::*;
+    #[test]
+    fn repeated_refusals_stop_reconnect_but_a_successful_session_resets_count(){
+        let mut count=0;
+        for attempt in 1..=REFUSED_RECONNECT_LIMIT{
+            count=next_refused_reconnect_count(count,false,true);
+            assert_eq!(count,attempt);
+        }
+        assert!(count>=REFUSED_RECONNECT_LIMIT);
+        assert_eq!(next_refused_reconnect_count(count,true,false),0);
+        assert_eq!(next_refused_reconnect_count(count,false,false),0);
+    }
     #[test]
     fn heartbeat_detects_silent_peer_without_waiting_for_tcp_eof(){
         let t=Instant::now();
