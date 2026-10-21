@@ -1,7 +1,15 @@
 package dev.heavenknows.kvmreader
 
 import java.security.MessageDigest
-import java.util.Locale\nimport com.southernstorm.noise.protocol.CipherState\nimport com.southernstorm.noise.protocol.HandshakeState\nimport java.io.BufferedInputStream\nimport java.io.BufferedOutputStream\nimport java.io.Closeable\nimport java.io.DataInputStream\nimport java.io.DataOutputStream\nimport java.net.Socket
+import java.util.Locale
+import com.southernstorm.noise.protocol.CipherState
+import com.southernstorm.noise.protocol.HandshakeState
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.Closeable
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.net.Socket
 
 object PairingKeyValidator {
     fun isValid(value: String): Boolean {
