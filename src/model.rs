@@ -162,7 +162,7 @@ impl Layout {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Platform { Windows, Mac }
+pub enum Platform { Windows, Mac, Android }
 impl Platform {
     pub fn local()->Self {
         if cfg!(target_os="macos") { Self::Mac } else { Self::Windows }
