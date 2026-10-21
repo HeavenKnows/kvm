@@ -2,7 +2,6 @@ package dev.heavenknows.kvmreader
 
 import org.msgpack.core.MessagePack
 import org.msgpack.value.Value
-import java.io.ByteArrayOutputStream
 
 /** The compact rmp-serde wire representation used by src/wire.rs. */
 sealed class WireMessage {
