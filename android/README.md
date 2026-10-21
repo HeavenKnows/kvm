@@ -4,7 +4,7 @@ This is the first buildable Android project for the 掌阅 Ocean5 Pro e-ink read
 
 Included: Android app module and dedicated APK CI; a user-enabled AccessibilityService; direct navigation to Android Accessibility Settings with permission state refreshed on return; tap/swipe helpers and focused text injection with local clipboard fallback; pairing-key format validation and unit tests.
 
-Implemented in this protocol foundation: desktop-compatible Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s session setup, the exact lowercase-UTF-8 SHA-256 PSK derivation, two-byte big-endian length-prefixed encrypted frames, and a loopback encrypted round-trip test. The MessagePack Wire adapter, listener/UI integration, remote input dispatch, e-ink refresh optimization, reconnect lifecycle, and one-way Windows/macOS-to-Android clipboard transport are still pending.
+Implemented in this protocol foundation: desktop-compatible Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s session setup, the exact lowercase-UTF-8 SHA-256 PSK derivation, two-byte big-endian length-prefixed encrypted frames, and a loopback encrypted round-trip test. A compact MessagePack adapter for the Rust Wire enum has been added, but it has not yet been interoperability-tested against the desktop peer. Listener/UI integration, remote input dispatch, e-ink refresh optimization, reconnect lifecycle, and one-way Windows/macOS-to-Android clipboard transport are still pending.
 
 A successful APK build is not Android feature-complete status. The Noise framing foundation is tested locally in Android JVM tests, but it is not yet integrated into a listening receiver and has not yet been interoperability-tested against the Rust desktop peer.
 
