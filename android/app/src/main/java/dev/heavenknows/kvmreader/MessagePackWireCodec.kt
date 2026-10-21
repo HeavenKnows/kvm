@@ -165,7 +165,7 @@ object MessagePackWireCodec {
     }
 
     private fun Value.array(): List<Value> = this.asArrayValue().list()
-    private fun Value.string(): String = this.asStringValue().string
+    private fun Value.string(): String = this.asStringValue().string()
     private fun Value.int(): Int = this.asIntegerValue().toInt()
     private fun Value.long(): Long = this.asIntegerValue().toLong()
     private fun Value.double(): Double = when {
