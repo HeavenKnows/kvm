@@ -23,8 +23,10 @@ class NoiseSession private constructor(
     private val sender: CipherState,
     private val receiver: CipherState
 ) : Closeable {
-    @Synchronized
-    fun send(plaintext: ByteArray) {
+    private val sendLock = Any()
+    private val receiveLock = Any()
+
+    fun send(plaintext: ByteArray) = synchronized(sendLock) {
         require(plaintext.isNotEmpty() && plaintext.size <= MAX_FRAME - TAG_BYTES) {
             "invalid plaintext frame size"
         }
@@ -34,8 +36,7 @@ class NoiseSession private constructor(
         writeFrame(output, encrypted.copyOf(count))
     }
 
-    @Synchronized
-    fun receive(): ByteArray {
+    fun receive(): ByteArray = synchronized(receiveLock) {
         val encrypted = readFrame(input)
         val plaintext = ByteArray(MAX_FRAME)
         val count = receiver.decryptWithAd(null, encrypted, 0, plaintext, 0, encrypted.size)
