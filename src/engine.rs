@@ -570,7 +570,8 @@ fn start_clipboard_inbound(shared:Arc<Shared>)->mpsc::Sender<clipboard::Incoming
                 if !receiver {*shared.owner.lock().unwrap()=Owner::Local;}
                 // Allow Finder/Explorer to observe the new pasteboard flavor.
                 std::thread::sleep(Duration::from_millis(30));
-                if shared.ready.load(Ordering::SeqCst)
+                if shared.clipboard.load(Ordering::Relaxed)
+                    && shared.ready.load(Ordering::SeqCst)
                     && shared.active.load(Ordering::SeqCst)==receiver {
                     paste_hotkey(Platform::local());
                 }
