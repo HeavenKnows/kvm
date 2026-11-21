@@ -15,6 +15,10 @@ fn paste_action(remote:bool, owner:Owner, enabled:bool)->PasteAction {
     }
 }
 
+fn should_install_incoming_clipboard(enabled:bool,ready:bool,active:bool,receiver:bool)->bool {
+    enabled && ready && active==receiver
+}
+
 /// AppKit pasteboard operations must run on the macOS GUI thread; sending
 /// requests here never holds any display or session lock while awaiting them.
 #[cfg(target_os="macos")]
@@ -551,11 +555,16 @@ fn send_clipboard_snapshot(shared:&Shared){
 fn start_clipboard_inbound(shared:Arc<Shared>)->mpsc::Sender<clipboard::Incoming>{
     let (tx,rx)=mpsc::channel();
     std::thread::spawn(move || clipboard::receive_loop(rx,|bytes|{
-        if !shared.ready.load(Ordering::SeqCst){return;}
-        // A slow file transfer must not paste into the wrong machine after
-        // the user has switched sides.
+        // The clipboard toggle gates both directions. In particular, never
+        // let an in-flight remote transfer overwrite the local pasteboard
+        // after the user has disabled clipboard sharing.
         let receiver=shared.is_receiver.load(Ordering::SeqCst);
-        if shared.active.load(Ordering::SeqCst)!=receiver {return;}
+        if !should_install_incoming_clipboard(
+            shared.clipboard.load(Ordering::Relaxed),
+            shared.ready.load(Ordering::SeqCst),
+            shared.active.load(Ordering::SeqCst),
+            receiver,
+        ){return;}
         match shared.write_clipboard(bytes){
             Ok(())=>{
                 if !receiver {*shared.owner.lock().unwrap()=Owner::Local;}
@@ -1323,6 +1332,15 @@ mod tests {
         assert_eq!(paste_action(false,Owner::Local,true),PasteAction::Native);
         assert_eq!(paste_action(true,Owner::Remote,true),PasteAction::Native);
         assert_eq!(paste_action(true,Owner::Local,false),PasteAction::Native);
+    }
+    #[test] fn incoming_clipboard_requires_enabled_ready_and_correct_side(){
+        assert!(should_install_incoming_clipboard(true,true,false,false));
+        assert!(should_install_incoming_clipboard(true,true,true,true));
+        assert!(!should_install_incoming_clipboard(false,true,false,false));
+        assert!(!should_install_incoming_clipboard(false,true,true,true));
+        assert!(!should_install_incoming_clipboard(true,false,false,false));
+        assert!(!should_install_incoming_clipboard(true,true,true,false));
+        assert!(!should_install_incoming_clipboard(true,true,false,true));
     }
 }
 
