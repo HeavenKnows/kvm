@@ -27,12 +27,12 @@ pub enum Wire {
     Pong(u64),
     /// Request the opposite peer's clipboard when pasting locally.
     ClipboardRequest,
-    /// The peer's native clipboard changed outside the KVM keyboard hook.
-    ClipboardChanged,
     /// Size-bounded binary clipboard transfer: text, RGBA image or file list.
     ClipboardBegin { bytes: u32 },
     ClipboardChunk(Vec<u8>),
     ClipboardEnd,
+    /// The peer's native clipboard changed outside the KVM keyboard hook.
+    ClipboardChanged,
 }
 
 fn frame_write(s:&mut TcpStream, bytes:&[u8])->io::Result<()> {
@@ -262,7 +262,7 @@ mod clipboard_wire_tests {
     #[test]
     fn binary_clipboard_chunks_roundtrip() {
         for message in [Wire::ClipboardRequest, Wire::ClipboardBegin { bytes: 128 },
-            Wire::ClipboardChunk(vec![0, 255, 1, 2]), Wire::ClipboardEnd,
+            Wire::ClipboardChunk(vec![0, 255, 1, 2]), Wire::ClipboardEnd, Wire::ClipboardChanged,
             Wire::Scroll{dx:-2,dy:3}, Wire::Shortcut(crate::input::Chord::parse("Command+Right").unwrap())] {
             let bytes = rmp_serde::to_vec(&message).unwrap();
             let decoded: Wire = rmp_serde::from_slice(&bytes).unwrap();
