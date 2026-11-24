@@ -32,6 +32,8 @@ use std::{
 
 #[cfg(target_os="macos")]
 fn mac_clipboard_change_count()->isize{
+    // objc::msg_send! expands to sel!, which must be explicitly in scope.
+    use objc::{sel,sel_impl};
     unsafe{
         let pasteboard:*mut objc::runtime::Object=
             objc::msg_send![objc::class!(NSPasteboard),generalPasteboard];
