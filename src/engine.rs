@@ -19,6 +19,10 @@ fn should_install_incoming_clipboard(enabled:bool,ready:bool,active:bool,receive
     enabled && ready && active==receiver
 }
 
+fn should_notify_clipboard_change(enabled:bool,ready:bool,receiver:bool)->bool {
+    enabled && ready && receiver
+}
+
 /// AppKit pasteboard operations must run on the macOS GUI thread; sending
 /// requests here never holds any display or session lock while awaiting them.
 #[cfg(target_os="macos")]
@@ -218,6 +222,17 @@ impl Shared {
         }
         #[cfg(not(target_os="macos"))]
         {clipboard::snapshot()}
+    }
+    /// Report native pasteboard changes that bypass keyboard shortcuts (for example,
+    /// browser Clipboard API writes). Only a receiver can announce the remote side.
+    pub fn notify_local_clipboard_changed(&self){
+        if should_notify_clipboard_change(
+            self.clipboard.load(Ordering::Relaxed),
+            self.ready.load(Ordering::SeqCst),
+            self.is_receiver.load(Ordering::SeqCst),
+        ){
+            self.send(Wire::ClipboardChanged);
+        }
     }
     fn write_clipboard(&self,data:Vec<u8>)->Result<(),String>{
         #[cfg(target_os="macos")]
@@ -879,6 +894,9 @@ pub fn start_server(shared:Arc<Shared>, s:Settings){
                             other=>simulate(other),
                         }
                     }
+                    Wire::ClipboardChanged=>{
+                        *shared.owner.lock().unwrap()=Owner::Remote;
+                    }
                     Wire::ClipboardRequest if shared.clipboard.load(Ordering::Relaxed)=>{
                         let _=clipboard_request_tx.try_send(());
                     }
@@ -1129,6 +1147,9 @@ fn client_session(shared:&Arc<Shared>,s:Settings)->Result<(),UiStatus>{
                 shared.return_cursor();
                 shared.info(UiStatus::Returned);
             }
+            Wire::ClipboardChanged=>{
+                *shared.owner.lock().unwrap()=Owner::Remote;
+            }
             Wire::ClipboardBegin{bytes}=>{
                 let _=incoming_clipboard.send(clipboard::Incoming::Begin(bytes));
             }
@@ -1333,6 +1354,12 @@ mod tests {
         assert_eq!(paste_action(false,Owner::Local,true),PasteAction::Native);
         assert_eq!(paste_action(true,Owner::Remote,true),PasteAction::Native);
         assert_eq!(paste_action(true,Owner::Local,false),PasteAction::Native);
+    }
+    #[test] fn native_clipboard_change_notification_requires_enabled_ready_receiver(){
+        assert!(should_notify_clipboard_change(true,true,true));
+        assert!(!should_notify_clipboard_change(false,true,true));
+        assert!(!should_notify_clipboard_change(true,false,true));
+        assert!(!should_notify_clipboard_change(true,true,false));
     }
     #[test] fn incoming_clipboard_requires_enabled_ready_and_correct_side(){
         assert!(should_install_incoming_clipboard(true,true,false,false));
