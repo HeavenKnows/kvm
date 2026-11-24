@@ -27,6 +27,8 @@ pub enum Wire {
     Pong(u64),
     /// Request the opposite peer's clipboard when pasting locally.
     ClipboardRequest,
+    /// The peer's native clipboard changed outside the KVM keyboard hook.
+    ClipboardChanged,
     /// Size-bounded binary clipboard transfer: text, RGBA image or file list.
     ClipboardBegin { bytes: u32 },
     ClipboardChunk(Vec<u8>),
