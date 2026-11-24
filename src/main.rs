@@ -30,6 +30,15 @@ use std::{
     time::{Duration,Instant},
 };
 
+#[cfg(target_os="macos")]
+fn mac_clipboard_change_count()->isize{
+    unsafe{
+        let pasteboard:*mut objc::runtime::Object=
+            objc::msg_send![objc::class!(NSPasteboard),generalPasteboard];
+        objc::msg_send![pasteboard,changeCount]
+    }
+}
+
 // Startup breadcrumbs are free of IP addresses, secrets, and keystrokes.
 #[cfg(target_os="macos")]
 fn launch_mark(stage:&str){
@@ -370,6 +379,8 @@ struct KvmApp {
     #[cfg(target_os="macos")]
     clipboard_job_rx:Receiver<engine::ClipboardUiJob>,
     #[cfg(target_os="macos")]
+    clipboard_change_count:isize,
+    #[cfg(target_os="macos")]
     font_failed:bool,
     #[cfg(target_os="macos")]
     font_ready:bool,
@@ -494,6 +505,8 @@ impl KvmApp {
             font_rx,
             #[cfg(target_os="macos")]
             clipboard_job_rx,
+            #[cfg(target_os="macos")]
+            clipboard_change_count:mac_clipboard_change_count(),
             #[cfg(target_os="macos")]
             font_failed:false,
             #[cfg(target_os="macos")]
@@ -1278,10 +1291,20 @@ impl eframe::App for KvmApp {
                         let _=reply.send(clipboard::snapshot());
                     }
                     Ok(engine::ClipboardUiJob::Install(data,reply))=>{
-                        let _=reply.send(clipboard::install(&data));
+                        let result=clipboard::install(&data);
+                        // KVM-originated writes must not be echoed back as new local changes.
+                        self.clipboard_change_count=mac_clipboard_change_count();
+                        let _=reply.send(result);
                     }
                     Err(_)=>break,
                 }
+            }
+            // NSPasteboard.changeCount catches writes made by browser JavaScript,
+            // Share menus and other apps that never generate Cmd+C key events.
+            let current=mac_clipboard_change_count();
+            if current!=self.clipboard_change_count {
+                self.clipboard_change_count=current;
+                self.state.notify_local_clipboard_changed();
             }
         }
         #[cfg(target_os="macos")]
