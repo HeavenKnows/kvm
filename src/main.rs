@@ -1696,6 +1696,9 @@ impl eframe::App for KvmApp {
                 });
         });
         if self.frames==4{launch_mark("full-ui-returned");}
+        #[cfg(target_os="macos")]
+        ctx.request_repaint_after(Duration::from_millis(50));
+        #[cfg(not(target_os="macos"))]
         ctx.request_repaint_after(Duration::from_millis(200));
     }
 }
